@@ -1,0 +1,80 @@
+[workspace]
+members = [
+    "hanshiro-core",
+    "hanshiro-storage",
+    "hanshiro-index",
+    "hanshiro-ingest",
+    "hanshiro-api",
+    "hanshiro-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["HanshiroDB Team"]
+edition = "2021"
+rust-version = "1.75.0"
+license = "Apache-2.0"
+repository = "https://github.com/hanshirodb/hanshirodb"
+
+[workspace.dependencies]
+# Core dependencies
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+thiserror = "2.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Storage dependencies
+rocksdb = "0.24"
+bytes = "1.7"
+bincode = "1.3"
+crc32fast = "1.4"
+blake3 = "1.5"
+memmap2 = "0.9"
+
+# Index dependencies
+roaring = "0.10"
+dashmap = "6.0"
+crossbeam-skiplist = "0.1"
+bloom = "0.3"
+
+# Vector processing
+candle-core = "0.8"
+candle-nn = "0.8"
+candle-transformers = "0.8"
+ndarray = "0.16"
+faiss = "0.12"
+
+# API dependencies
+tonic = "0.12"
+tonic-reflection = "0.12"
+prost = "0.13"
+tower = "0.4"
+hyper = "1.4"
+
+# CLI dependencies
+clap = { version = "4.5", features = ["derive", "env"] }
+indicatif = "0.17"
+console = "0.15"
+
+# Testing & Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.5"
+tempfile = "3.10"
+fake = "2.10"
+quickcheck = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+strip = true
+
+[profile.bench]
+inherits = "release"
+debug = true

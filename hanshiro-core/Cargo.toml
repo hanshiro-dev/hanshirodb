@@ -1,0 +1,37 @@
+[package]
+name = "hanshiro-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Core dependencies
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+# Cryptography
+blake3 = { workspace = true }
+crc32fast = { workspace = true }
+ring = "0.17"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+# Compression
+lz4 = "1.24"
+zstd = "0.13"
+
+[dev-dependencies]
+proptest = { workspace = true }
+quickcheck = { workspace = true }
