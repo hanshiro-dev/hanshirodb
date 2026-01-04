@@ -144,18 +144,17 @@ struct WalFile {
 }
 
 impl WriteAheadLog {
-    /// Create new WAL instance
+
+    // Create new WAL instance
     pub async fn new(wal_dir: impl AsRef<Path>, config: WalConfig) -> Result<Self> {
         let wal_dir = wal_dir.as_ref().to_path_buf();
         
-        // Create WAL directory if it doesn't exist
         tokio::fs::create_dir_all(&wal_dir).await
             .map_err(|e| Error::Io { 
                 message: format!("Failed to create WAL directory: {:?}", wal_dir),
                 source: e,
             })?;
         
-        // Find the latest WAL file or create a new one
         let (current_file, sequence, merkle_chain) = Self::open_or_create_wal_file(&wal_dir, &config).await?;
         
         Ok(Self {

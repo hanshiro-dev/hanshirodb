@@ -1,11 +1,11 @@
 # HanshiroDB
 
 <div align="center">
-  <img src="docs/logo.svg" alt="HanshiroDB Logo" width="300"/>
+  <img src="docs/logo.png" alt="HanshiroDB Logo" width="300"/>
   
   **High-Velocity, Tamper-Proof Vector Database for SecOps**
   
-  [![Build Status](https://github.com/hanshirodb/hanshirodb/workflows/CI/badge.svg)](https://github.com/hanshirodb/hanshirodb/actions)
+  [![Build Status](https://github.com/hanshiro-dev/hanshirodb/workflows/CI/badge.svg)](https://github.com/hanshiro-dev/hanshirodb/actions)
   [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
   [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 </div>
