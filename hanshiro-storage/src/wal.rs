@@ -394,22 +394,17 @@ impl WriteAheadLog {
         let mut header_buf = vec![0u8; ENTRY_HEADER_SIZE];
         let mut cursor = std::io::Cursor::new(&mut header_buf);
         
-        // Write entry header
         cursor.write_u32::<LittleEndian>(entry.data.len() as u32)?;
         cursor.write_u64::<LittleEndian>(entry.sequence)?;
         cursor.write_u64::<LittleEndian>(entry.timestamp)?;
         cursor.write_u8(entry.entry_type as u8)?;
         cursor.write_u8(0)?; // Flags
-        
-        // Calculate and write CRC32
         let crc = crc32_checksum(&entry.data);
         cursor.write_u32::<LittleEndian>(crc)?;
         cursor.write_all(&[0u8; 6])?; // Reserved bytes
-        
-        // Write header
         writer.write_all(&header_buf)?;
         
-        // Write Merkle info (hash strings are hex encoded, need to decode back to 32 bytes)
+        /// Hash strings are hex encoded, decode back to 32 bytes
         let prev_hash_bytes = entry.merkle.prev_hash.as_ref()
             .map(|h| hex::decode(h).unwrap())
             .unwrap_or_else(|| vec![0u8; 32]);
@@ -421,7 +416,6 @@ impl WriteAheadLog {
         let data_hash_bytes = hex::decode(&entry.merkle.data_hash).unwrap();
         writer.write_all(&data_hash_bytes)?;
         
-        // Write payload
         writer.write_all(&entry.data)?;
         
         Ok(())
@@ -522,7 +516,7 @@ impl WriteAheadLog {
             .write(true)
             .open(path)?;
             
-        let mut reader = BufReader::new(file.try_clone()?);
+        let mut reader = BufReader::new(file);
         
         // Read and validate header
         let mut magic = [0u8; 8];
@@ -571,8 +565,10 @@ impl WriteAheadLog {
         // Seek to end for appending
         let file_size = reader.seek(SeekFrom::End(0))?;
         
-        // Open for writing
-        let writer = BufWriter::with_capacity(config.buffer_size, file);
+        // Get the underlying file and seek to end before wrapping in BufWriter
+        let mut file_for_write = reader.into_inner();
+        file_for_write.seek(SeekFrom::End(0))?;
+        let writer = BufWriter::with_capacity(config.buffer_size, file_for_write);
         
         Ok((
             WalFile {

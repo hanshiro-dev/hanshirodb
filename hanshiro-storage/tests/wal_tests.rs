@@ -1132,3 +1132,44 @@ mod property_tests {
         }
     }
 }
+
+#[tokio::test]
+async fn test_wal_recovery_appends_not_overwrites() {
+    let temp_dir = TempDir::new().unwrap();
+    
+    // Write initial events
+    {
+        let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+            .await
+            .unwrap();
+        for i in 0..5u64 {
+            let event = create_test_event(i, 100);
+            wal.append(&event).await.unwrap();
+        }
+    }
+    
+    // Reopen and write more - these must append, not overwrite
+    {
+        let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+            .await
+            .unwrap();
+        for i in 5..10u64 {
+            let event = create_test_event(i, 100);
+            let seq = wal.append(&event).await.unwrap();
+            assert_eq!(seq, i, "Sequence should continue from {}, got {}", i, seq);
+        }
+    }
+    
+    // Verify all 10 events exist
+    let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+        .await
+        .unwrap();
+    let entries = wal.read_from(0).await.unwrap();
+    
+    assert_eq!(entries.len(), 10, "Expected 10 events, got {}", entries.len());
+    
+    // Verify sequences are continuous 0-9
+    for (i, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.sequence, i as u64);
+    }
+}
