@@ -1,7 +1,7 @@
 # HanshiroDB
 
 <div align="center">
-  <img src="docs/logo.png" alt="HanshiroDB Logo" width="700"/>
+  <img src="docs/logo.png" alt="HanshiroDB Logo" width="800"/>
   
   **High-Velocity, Tamper-Proof Vector Database for SecOps**
   
