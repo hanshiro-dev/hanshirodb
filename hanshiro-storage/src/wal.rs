@@ -218,7 +218,6 @@ impl WriteAheadLog {
         let delay = std::time::Duration::from_micros(config.group_commit_delay_us);
         
         loop {
-            // Wait for first write
             let first = match rx.recv().await {
                 Some(req) => req,
                 None => break, // Channel closed, shutdown
@@ -231,11 +230,10 @@ impl WriteAheadLog {
             while batch.len() < config.max_batch_size {
                 match tokio::time::timeout_at(deadline, rx.recv()).await {
                     Ok(Some(req)) => batch.push(req),
-                    _ => break, // Timeout or channel closed
+                    _ => break, // Timeout
                 }
             }
             
-            // Write batch with single fsync
             let result = Self::write_batch_sync(&current_file, &batch, &config);
             let total_bytes: u64 = batch.iter().map(|r| r.entry.data.len() as u64).sum();
             
@@ -258,7 +256,6 @@ impl WriteAheadLog {
         }
     }
     
-    /// Synchronous batch write with single fsync
     fn write_batch_sync(
         current_file: &Arc<RwLock<WalFile>>,
         batch: &[WriteRequest],
@@ -273,7 +270,6 @@ impl WriteAheadLog {
             wal_file.last_sequence = req.entry.sequence;
         }
         
-        // Single sync for entire batch
         if config.sync_on_write {
             wal_file.file.flush()?;
             wal_file.file.get_ref().sync_all()?;
@@ -282,7 +278,6 @@ impl WriteAheadLog {
         Ok(())
     }
     
-    /// Append single event (uses group commit)
     pub async fn append(&self, event: &Event) -> Result<u64> {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let timestamp = std::time::SystemTime::now()
@@ -309,8 +304,7 @@ impl WriteAheadLog {
             merkle,
         };
         
-        // Send to group commit task and wait for result
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel(); // single use channel
         self.write_tx.send(WriteRequest { entry, response: tx }).await
             .map_err(|_| Error::WriteAheadLog {
                 message: "WAL write channel closed".to_string(),
@@ -325,7 +319,7 @@ impl WriteAheadLog {
         Ok(sequence)
     }
     
-    /// Batch append - bypasses group commit for explicit batches
+    /// Batch append, bypasses group commit for explicit batches
     pub async fn append_batch(&self, events: &[Event]) -> Result<Vec<u64>> {
         if events.is_empty() {
             return Ok(vec![]);
@@ -363,7 +357,6 @@ impl WriteAheadLog {
             });
         }
 
-        // Direct write for explicit batches
         self.write_entry_batch(&entries).await?;
         
         let total_bytes: u64 = entries.iter().map(|e| e.data.len() as u64).sum();
@@ -372,7 +365,9 @@ impl WriteAheadLog {
         Ok(sequences)
     }
 
-    /// Write batch directly (for explicit batch API)
+    /// Write batch directly (for explicit batch API).
+    /// The duplication between this and write_batch_sync exists because 
+    /// one is used in the async group commit path and the other in the direct batch API.
     async fn write_entry_batch(&self, entries: &[WalEntry]) -> Result<()> {
         let mut wal_file = self.current_file.write();
 
@@ -391,12 +386,10 @@ impl WriteAheadLog {
         Ok(())
     }
     
-    /// Calculate entry size
     fn entry_size(entry: &WalEntry) -> usize {
         ENTRY_HEADER_SIZE + MERKLE_INFO_SIZE + entry.data.len()
     }
     
-    /// Write entry to file
     fn write_entry_to_file(writer: &mut impl Write, entry: &WalEntry) -> Result<()> {
         let mut header_buf = vec![0u8; ENTRY_HEADER_SIZE];
         let mut cursor = std::io::Cursor::new(&mut header_buf);

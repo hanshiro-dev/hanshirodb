@@ -30,6 +30,7 @@ pub mod wal;
 pub mod memtable;
 pub mod sstable;
 pub mod compaction;
+pub mod partitioning;
 pub mod engine;
 pub mod manifest;
 pub mod cache;
