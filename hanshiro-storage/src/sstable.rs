@@ -122,7 +122,7 @@ impl Default for SSTableConfig {
     fn default() -> Self {
         Self {
             block_size: DEFAULT_BLOCK_SIZE,
-            compression: CompressionType::Zstd,
+            compression: CompressionType::Snappy, // Fast compression for write throughput
             bloom_bits_per_key: 10,
             index_interval: 128, // Index every 128th key
         }
