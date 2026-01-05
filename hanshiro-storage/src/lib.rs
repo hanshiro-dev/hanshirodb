@@ -27,7 +27,6 @@
 //! ```
 
 pub mod wal;
-pub mod wal_optimized;
 pub mod memtable;
 pub mod sstable;
 pub mod compaction;

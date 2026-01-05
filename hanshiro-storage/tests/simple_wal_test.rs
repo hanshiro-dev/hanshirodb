@@ -59,7 +59,7 @@ async fn test_wal_basic() {
     assert_eq!(entries[0].sequence, 0);
     
     // Deserialize and verify event
-    let recovered: Event = bincode::deserialize(&entries[0].data)
+    let recovered: Event = rmp_serde::from_slice(&entries[0].data)
         .expect("Failed to deserialize event");
     assert_eq!(recovered.event_type, EventType::NetworkConnection);
     assert_eq!(recovered.raw_data, b"test event data");

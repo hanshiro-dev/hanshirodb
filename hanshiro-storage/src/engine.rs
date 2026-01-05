@@ -10,21 +10,25 @@
 //! ├─────────────────────────────────────────────────────────────┤
 //! │                                                              │
 //! │  Write Path:                                                 │
-//! │  ┌─────────┐    ┌─────────┐    ┌──────────┐               │
-//! │  │  Event  │───>│   WAL   │───>│ MemTable │               │
-//! │  └─────────┘    └─────────┘    └────┬─────┘               │
-//! │                                      │ Flush                │
-//! │                                      ▼                      │
-//! │                                ┌──────────┐                 │
-//! │                                │ SSTable  │                 │
-//! │                                └──────────┘                 │
+//! │  ┌─────────┐    ┌─────────┐    ┌──────────┐                │
+//! │  │  Event  │───>│   WAL   │───>│ MemTable │                │
+//! │  └─────────┘    └─────────┘    └────┬─────┘                │
+//! │                                      │ Flush                 │
+//! │                                      ▼                       │
+//! │                                ┌──────────┐                  │
+//! │                                │ SSTable  │                  │
+//! │                                └──────────┘                  │
 //! │                                                              │
 //! │  Read Path:                                                  │
-//! │  ┌─────────┐    ┌──────────┐    ┌──────────┐              │
-//! │  │  Query  │───>│ MemTable │───>│ SSTables │              │
-//! │  └─────────┘    └──────────┘    └──────────┘              │
-//! │       │                                                      │
-//! │       └──────────> Bloom Filter Check First                 │
+//! │  ┌─────────┐    ┌──────────┐    ┌──────────┐               │
+//! │  │  Query  │───>│ MemTable │───>│ SSTables │               │
+//! │  └─────────┘    └──────────┘    └──────────┘               │
+//! │                                                              │
+//! │  Recovery Path:                                              │
+//! │  ┌──────────┐    ┌─────────────┐    ┌──────────┐           │
+//! │  │ Manifest │───>│ WAL Replay  │───>│ MemTable │           │
+//! │  │checkpoint│    │ from seq N  │    │ rebuilt  │           │
+//! │  └──────────┘    └─────────────┘    └──────────┘           │
 //! │                                                              │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
@@ -32,7 +36,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use tokio::sync::RwLock;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
@@ -45,9 +51,10 @@ use hanshiro_core::{
 };
 
 use crate::{
-    wal::{WriteAheadLog, WalConfig},
-    memtable::{MemTableManager, MemTableConfig},
-    sstable::{SSTableWriter, SSTableReader, SSTableConfig, SSTableInfo},
+    manifest::{Manifest, SSTableManifestEntry},
+    memtable::{MemTableConfig, MemTableManager},
+    sstable::{SSTableConfig, SSTableInfo, SSTableReader, SSTableWriter},
+    wal::{WalConfig, WriteAheadLog},
 };
 
 /// Storage engine configuration
@@ -80,12 +87,14 @@ pub struct StorageEngine {
     wal: Arc<WriteAheadLog>,
     memtable_manager: Arc<MemTableManager>,
     sstables: Arc<RwLock<Vec<SSTableInfo>>>,
+    manifest: Arc<Mutex<Manifest>>,
     metrics: Arc<Metrics>,
     shutdown: tokio::sync::watch::Sender<bool>,
+    next_sstable_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl StorageEngine {
-    /// Create new storage engine
+    /// Create or recover storage engine
     pub async fn new(config: StorageConfig) -> Result<Self> {
         // Create directories
         tokio::fs::create_dir_all(&config.data_dir).await?;
@@ -93,79 +102,142 @@ impl StorageEngine {
         let sstable_dir = config.data_dir.join("sstables");
         tokio::fs::create_dir_all(&wal_dir).await?;
         tokio::fs::create_dir_all(&sstable_dir).await?;
+
+        // Load or create manifest
+        let manifest = Manifest::load_or_create(&config.data_dir)?;
+        let wal_checkpoint = manifest.wal_checkpoint;
         
-        // Initialize components
-        let wal = Arc::new(WriteAheadLog::new(wal_dir, config.wal_config.clone()).await?);
+        // Compute next SSTable ID
+        let next_sstable_id = manifest
+            .sstables
+            .iter()
+            .map(|s| s.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+
+        info!(
+            "Opening database: wal_checkpoint={}, sstables={}",
+            wal_checkpoint,
+            manifest.sstables.len()
+        );
+
+        // Initialize WAL (recovers sequence numbers and Merkle chain)
+        let wal = Arc::new(WriteAheadLog::new(&wal_dir, config.wal_config.clone()).await?);
+
+        // Initialize MemTable
         let metrics = Arc::new(Metrics::new());
         let memtable_manager = Arc::new(MemTableManager::new(
             config.memtable_config.clone(),
             metrics.clone(),
         ));
-        
-        // Load existing SSTables
-        let sstables = Self::load_sstables(&sstable_dir).await?;
-        
+
+        // Load SSTable metadata from manifest
+        let sstables: Vec<SSTableInfo> = manifest
+            .sstables
+            .iter()
+            .map(|entry| SSTableInfo {
+                path: entry.path.clone(),
+                file_size: entry.size,
+                entry_count: entry.entry_count,
+                min_key: bytes::Bytes::from(entry.min_key.clone()),
+                max_key: bytes::Bytes::from(entry.max_key.clone()),
+                creation_time: entry.creation_time,
+                level: entry.level,
+            })
+            .collect();
+
+        // === CRASH RECOVERY: Replay WAL entries not yet flushed to SSTable ===
+        let replayed = Self::replay_wal(&wal, &memtable_manager, wal_checkpoint).await?;
+        if replayed > 0 {
+            info!(
+                "Crash recovery: replayed {} WAL entries from sequence {}",
+                replayed, wal_checkpoint
+            );
+        }
+
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
-        
+
         let engine = Self {
             config,
             wal,
             memtable_manager,
             sstables: Arc::new(RwLock::new(sstables)),
+            manifest: Arc::new(Mutex::new(manifest)),
             metrics,
             shutdown: shutdown_tx,
+            next_sstable_id: Arc::new(std::sync::atomic::AtomicU64::new(next_sstable_id)),
         };
-        
+
         // Start background tasks
         engine.start_background_tasks();
-        
+
         Ok(engine)
     }
-    
-    /// Load existing SSTables from disk
-    async fn load_sstables(sstable_dir: &PathBuf) -> Result<Vec<SSTableInfo>> {
-        let mut sstables = Vec::new();
-        let mut entries = tokio::fs::read_dir(sstable_dir).await?;
+
+    /// Replay WAL entries after checkpoint into MemTable
+    async fn replay_wal(
+        wal: &WriteAheadLog,
+        memtable_manager: &MemTableManager,
+        checkpoint: u64,
+    ) -> Result<usize> {
+        // Read all WAL entries after the checkpoint
+        let entries = wal.read_from(checkpoint).await?;
         
-        while let Some(entry) = entries.next_entry().await? {
-            if entry.path().extension() == Some(std::ffi::OsStr::new("sst")) {
-                // In a real implementation, we'd parse SSTable metadata
-                let info = SSTableInfo {
-                    path: entry.path(),
-                    file_size: entry.metadata().await?.len(),
-                    entry_count: 0, // Would be stored in SSTable
-                    min_key: bytes::Bytes::new(),
-                    max_key: bytes::Bytes::new(),
-                    creation_time: 0,
-                    level: 0,
-                };
-                sstables.push(info);
+        let mut replayed = 0;
+        for entry in entries {
+            // Skip entries at or before checkpoint (already flushed)
+            if entry.sequence <= checkpoint && checkpoint > 0 {
+                continue;
+            }
+
+            // Deserialize and insert into MemTable
+            match rmp_serde::from_slice::<Event>(&entry.data) {
+                Ok(event) => {
+                    if let Err(e) = memtable_manager.insert(event) {
+                        warn!("Failed to replay WAL entry {}: {:?}", entry.sequence, e);
+                    } else {
+                        replayed += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to deserialize WAL entry {}: {:?}",
+                        entry.sequence, e
+                    );
+                }
             }
         }
-        
-        // Sort by creation time (oldest first)
-        sstables.sort_by_key(|info| info.creation_time);
-        
-        info!("Loaded {} SSTables", sstables.len());
-        Ok(sstables)
+
+        Ok(replayed)
     }
-    
+
     /// Start background tasks
     fn start_background_tasks(&self) {
         // Flush task
         let memtable_manager = Arc::clone(&self.memtable_manager);
         let sstables = Arc::clone(&self.sstables);
+        let manifest = Arc::clone(&self.manifest);
+        let wal = Arc::clone(&self.wal);
         let config = self.config.clone();
+        let next_id = Arc::clone(&self.next_sstable_id);
         let mut shutdown_rx = self.shutdown.subscribe();
-        
+
         tokio::spawn(async move {
             let mut flush_interval = interval(config.flush_interval);
             flush_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            
+
             loop {
                 tokio::select! {
                     _ = flush_interval.tick() => {
-                        if let Err(e) = Self::flush_memtables(&memtable_manager, &sstables, &config).await {
+                        if let Err(e) = Self::flush_memtables(
+                            &memtable_manager,
+                            &sstables,
+                            &manifest,
+                            &wal,
+                            &config,
+                            &next_id,
+                        ).await {
                             error!("Flush error: {:?}", e);
                         }
                     }
@@ -176,16 +248,16 @@ impl StorageEngine {
                 }
             }
         });
-        
+
         // Compaction task
         let sstables = Arc::clone(&self.sstables);
         let config = self.config.clone();
         let mut shutdown_rx = self.shutdown.subscribe();
-        
+
         tokio::spawn(async move {
             let mut compaction_interval = interval(config.compaction_interval);
             compaction_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            
+
             loop {
                 tokio::select! {
                     _ = compaction_interval.tick() => {
@@ -201,81 +273,138 @@ impl StorageEngine {
             }
         });
     }
-    
-    /// Flush MemTables to SSTables
+
+    /// Flush MemTables to SSTables and update manifest
     async fn flush_memtables(
         memtable_manager: &Arc<MemTableManager>,
         sstables: &Arc<RwLock<Vec<SSTableInfo>>>,
+        manifest: &Arc<Mutex<Manifest>>,
+        wal: &Arc<WriteAheadLog>,
         config: &StorageConfig,
+        next_id: &Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<()> {
         while let Some(memtable) = memtable_manager.get_immutable_for_flush() {
-            info!("Flushing MemTable to SSTable");
-            
             let entries = memtable.get_all_entries();
             if entries.is_empty() {
                 continue;
             }
-            
-            // Create new SSTable
+
+            info!("Flushing MemTable with {} entries to SSTable", entries.len());
+
+            // Track sequence range for this flush
+            let mut min_sequence = u64::MAX;
+            let mut max_sequence = 0u64;
+
+            // Generate SSTable ID and path
+            let sstable_id = next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            let sstable_path = config.data_dir
+            let sstable_path = config
+                .data_dir
                 .join("sstables")
-                .join(format!("{}.sst", timestamp));
-            
+                .join(format!("{}_{}.sst", sstable_id, timestamp));
+
             let mut writer = SSTableWriter::new(&sstable_path, config.sstable_config.clone())?;
-            
+
             // Write all entries
-            for (key, entry) in entries {
-                let key_bytes = bincode::serialize(&key)
+            for (key, entry) in &entries {
+                let key_bytes = rmp_serde::to_vec(&key)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
-                let value_bytes = bincode::serialize(&entry.event)
+                let value_bytes = rmp_serde::to_vec(&entry.event)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
                 writer.add(&key_bytes, &value_bytes)?;
+
+                min_sequence = min_sequence.min(entry.sequence);
+                max_sequence = max_sequence.max(entry.sequence);
             }
-            
+
             let info = writer.finish()?;
-            
-            // Add to SSTable list
+
+            // Create manifest entry
+            let manifest_entry = SSTableManifestEntry {
+                id: sstable_id,
+                level: 0,
+                path: sstable_path,
+                size: info.file_size,
+                entry_count: info.entry_count,
+                min_key: info.min_key.to_vec(),
+                max_key: info.max_key.to_vec(),
+                min_sequence,
+                max_sequence,
+                creation_time: timestamp,
+            };
+
+            // Update manifest with new SSTable and checkpoint
+            {
+                let mut m = manifest.lock();
+                m.add_sstable(manifest_entry);
+                m.update_checkpoint(max_sequence);
+                m.save(&config.data_dir)?;
+            }
+
+            // Add to in-memory SSTable list
             sstables.write().await.push(info);
-            
+
             // Clear the flushed MemTable
             memtable.clear();
+
+            info!(
+                "Flushed MemTable: sequences {}..{}, checkpoint updated",
+                min_sequence, max_sequence
+            );
+
+            // Optionally truncate old WAL files
+            // wal.truncate(max_sequence).await?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Compact SSTables
     async fn compact_sstables(
         sstables: &Arc<RwLock<Vec<SSTableInfo>>>,
-        config: &StorageConfig,
+        _config: &StorageConfig,
     ) -> Result<()> {
         let tables = sstables.read().await;
-        
-        // Simple compaction: merge small SSTables
+
         if tables.len() < 4 {
             return Ok(());
         }
-        
+
         info!("Starting compaction of {} SSTables", tables.len());
-        
         // TODO: Implement proper compaction logic
-        // For now, just log
-        
+
         Ok(())
     }
-    
+
     /// Force flush all MemTables
     pub async fn force_flush(&self) -> Result<()> {
-        Self::flush_memtables(&self.memtable_manager, &self.sstables, &self.config).await
+        Self::flush_memtables(
+            &self.memtable_manager,
+            &self.sstables,
+            &self.manifest,
+            &self.wal,
+            &self.config,
+            &self.next_sstable_id,
+        )
+        .await
     }
-    
+
     /// Verify WAL integrity
     pub async fn verify_wal_integrity(&self) -> Result<()> {
         self.wal.verify_integrity().await
+    }
+
+    /// Flush WAL to disk (for testing crash scenarios)
+    pub async fn flush_wal(&self) -> Result<()> {
+        self.wal.flush().await
+    }
+
+    /// Get current WAL checkpoint
+    pub fn wal_checkpoint(&self) -> u64 {
+        self.manifest.lock().wal_checkpoint
     }
 }
 
@@ -283,103 +412,101 @@ impl StorageEngine {
 impl hanshiro_core::traits::StorageEngine for StorageEngine {
     async fn write(&self, event: Event) -> Result<EventId> {
         let event_id = event.id;
-        
-        // Write to WAL first
+
+        // Write to WAL first (durability)
         self.wal.append(&event).await?;
-        
-        // Then write to MemTable
+
+        // Then write to MemTable (queryable)
         self.memtable_manager.insert(event)?;
-        
-        // Update metrics
+
         self.metrics.record_ingestion(1, 0);
-        
+
         Ok(event_id)
     }
-    
+
     async fn read(&self, id: EventId) -> Result<Option<Event>> {
-        // Check MemTable first
+        // Check MemTable first (hot data)
         if let Some(event) = self.memtable_manager.get(&id) {
             return Ok(Some(event));
         }
-        
-        // Then check SSTables
+
+        // Then check SSTables (newest first)
         let sstables = self.sstables.read().await;
-        for info in sstables.iter().rev() {  // Check newest first
+        for info in sstables.iter().rev() {
             let reader = SSTableReader::open(&info.path)?;
-            let key = bincode::serialize(&id)
+            let key = rmp_serde::to_vec(&id)
                 .map_err(|e| Error::Internal { message: e.to_string() })?;
-            
+
             if let Some(value) = reader.get(&key)? {
-                let event: Event = bincode::deserialize(&value)
+                let event: Event = rmp_serde::from_slice(&value)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
                 return Ok(Some(event));
             }
         }
-        
+
         Ok(None)
     }
-    
+
     async fn write_batch(&self, events: Vec<Event>) -> Result<Vec<EventId>> {
-        let mut ids = Vec::with_capacity(events.len());
-        
+        let ids: Vec<EventId> = events.iter().map(|e| e.id).collect();
+
+        // Batch write to WAL
+        self.wal.append_batch(&events).await?;
+
+        // Insert into MemTable
         for event in events {
-            let id = self.write(event).await?;
-            ids.push(id);
+            self.memtable_manager.insert(event)?;
         }
-        
+
+        self.metrics.record_ingestion(ids.len() as u64, 0);
+
         Ok(ids)
     }
-    
+
     async fn scan(&self, start: u64, end: u64) -> Result<Vec<Event>> {
         let mut all_events = Vec::new();
-        
+
         // Scan MemTable
         let memtable_events = self.memtable_manager.active.read().scan(start, end);
         all_events.extend(memtable_events);
-        
+
         // Scan immutable MemTables
         for memtable in self.memtable_manager.immutable.read().iter() {
             let events = memtable.scan(start, end);
             all_events.extend(events);
         }
-        
+
         // Scan SSTables
         let sstables = self.sstables.read().await;
         for info in &*sstables {
             let reader = SSTableReader::open(&info.path)?;
-            
-            // In a real implementation, we'd use the index to efficiently scan
+
             for result in reader.iter() {
                 let (_, value) = result?;
-                let event: Event = bincode::deserialize(&value)
+                let event: Event = rmp_serde::from_slice(&value)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
-                
-                // Check if event is in time range
+
                 let event_ts = event.timestamp.timestamp() as u64;
                 if event_ts >= start && event_ts <= end {
                     all_events.push(event);
                 }
             }
         }
-        
-        // Sort by timestamp
+
         all_events.sort_by_key(|e| e.timestamp);
-        
+
         Ok(all_events)
     }
-    
+
     async fn stats(&self) -> Result<StorageStats> {
         let memtable_stats = self.memtable_manager.stats();
         let sstables = self.sstables.read().await;
-        
-        let total_bytes: u64 = sstables.iter()
-            .map(|info| info.file_size)
-            .sum();
-        
-        let total_events: u64 = sstables.iter()
-            .map(|info| info.entry_count)
-            .sum::<u64>() + memtable_stats.active.entry_count as u64;
-        
+
+        let total_bytes: u64 = sstables.iter().map(|info| info.file_size).sum();
+
+        let total_events: u64 = sstables.iter().map(|info| info.entry_count).sum::<u64>()
+            + memtable_stats.active.entry_count as u64;
+
         Ok(StorageStats {
             total_events,
             total_bytes,
@@ -389,18 +516,18 @@ impl hanshiro_core::traits::StorageEngine for StorageEngine {
             compaction_pending: sstables.len() > 10,
         })
     }
-    
+
     async fn flush(&self) -> Result<()> {
         self.wal.flush().await?;
         self.force_flush().await?;
         Ok(())
     }
-    
+
     async fn compact(&self) -> Result<CompactionResult> {
         let start = std::time::Instant::now();
-        
+
         Self::compact_sstables(&self.sstables, &self.config).await?;
-        
+
         Ok(CompactionResult {
             files_compacted: 0,
             bytes_reclaimed: 0,
@@ -411,7 +538,6 @@ impl hanshiro_core::traits::StorageEngine for StorageEngine {
 
 impl Drop for StorageEngine {
     fn drop(&mut self) {
-        // Signal shutdown to background tasks
         let _ = self.shutdown.send(true);
     }
 }

@@ -31,9 +31,9 @@ fn create_test_event(id: u64, data_size: usize) -> Event {
         },
         vec![b'x'; data_size],
     );
-    // Don't add metadata in tests - bincode doesn't support serde_json::Value
-    // event.add_metadata("test_id", id);
-    // event.add_metadata("severity", "high");
+    // MessagePack supports serde_json::Value
+    event.add_metadata("test_id", id);
+    event.add_metadata("severity", "high");
     event
 }
 
@@ -55,7 +55,7 @@ async fn test_wal_basic_write_read() {
     assert_eq!(entries[0].sequence, 0);
     
     // Verify data integrity
-    let recovered_event: Event = bincode::deserialize(&entries[0].data).unwrap();
+    let recovered_event: Event = rmp_serde::from_slice(&entries[0].data).unwrap();
     assert_eq!(recovered_event.id, event.id);
 }
 
@@ -396,7 +396,7 @@ async fn test_wal_file_rotation() {
     
     // Verify each entry can be deserialized
     for entry in &entries {
-        let event: Event = bincode::deserialize(&entry.data)
+        let event: Event = rmp_serde::from_slice(&entry.data)
             .expect("Failed to deserialize event after rotation");
         assert_eq!(event.raw_data.len(), 1024);
     }
@@ -667,7 +667,7 @@ async fn test_wal_large_events() {
     assert_eq!(entries.len(), sizes.len());
     
     for (i, entry) in entries.iter().enumerate() {
-        let event: Event = bincode::deserialize(&entry.data).unwrap();
+        let event: Event = rmp_serde::from_slice(&entry.data).unwrap();
         assert_eq!(event.raw_data.len(), sizes[i]);
     }
 }
@@ -998,7 +998,7 @@ async fn test_wal_batch_with_varying_event_sizes() {
     assert_eq!(entries.len(), sizes.len());
     
     for (i, entry) in entries.iter().enumerate() {
-        let event: Event = bincode::deserialize(&entry.data).unwrap();
+        let event: Event = rmp_serde::from_slice(&entry.data).unwrap();
         assert_eq!(event.raw_data.len(), sizes[i], 
             "Event {} has wrong size: expected {}, got {}", i, sizes[i], event.raw_data.len());
     }
@@ -1100,7 +1100,7 @@ mod property_tests {
                 let entries = wal.read_from(0).await.unwrap();
                 assert_eq!(entries.len(), 1);
                 
-                let recovered: Event = bincode::deserialize(&entries[0].data).unwrap();
+                let recovered: Event = rmp_serde::from_slice(&entries[0].data).unwrap();
                 assert_eq!(recovered.raw_data.len(), size);
             });
         }

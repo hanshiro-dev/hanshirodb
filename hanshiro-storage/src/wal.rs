@@ -1,34 +1,26 @@
-//! Write-Ahead Log (WAL) with Group Commit
+//! Write-Ahead Log (WAL) with Merkle chain integrity and group commit optimization.
 //!
-//! High-performance WAL with Merkle chain integrity and group commit optimization.
-//! Achieves ~292K ops/sec (batch) with full cryptographic chaining.
-//!
-//! ## Write Path Architecture
-//!
-//! ```text
+//! Write Path Architecture
 //! ┌─────────────────────────────────────────────────────────────────────────┐
 //! │                         Write Path (Group Commit)                       │
 //! ├─────────────────────────────────────────────────────────────────────────┤
 //! │                                                                         │
 //! │   Writer 1 ──┐                                                          │
 //! │   Writer 2 ──┼──► Channel ──► Group Commit Task ──► Batch Write ──► Disk│
-//! │   Writer 3 ──┘      │              │                    │               │
-//! │                     │              │                    │               │
-//! │              ┌──────▼──────┐ ┌─────▼─────┐      ┌──────▼──────┐        │
-//! │              │ WriteRequest│ │  Collect  │      │ Single fsync│        │
-//! │              │ + oneshot   │ │  within   │      │ for batch   │        │
-//! │              │   channel   │ │  delay_us │      │             │        │
-//! │              └─────────────┘ └───────────┘      └─────────────┘        │
+//! │   Writer 3 ──┘      │              │                   │                │
+//! │                     │              │                   │                │
+//! │              ┌──────▼──────┐ ┌─────▼─────┐      ┌──────▼──────┐         │
+//! │              │ WriteRequest│ │  Collect  │      │ Single fsync│         │
+//! │              │ + oneshot   │ │  within   │      │ for batch   │         │
+//! │              │   channel   │ │  delay_us │      │             │         │
+//! │              └─────────────┘ └───────────┘      └─────────────┘         │
 //! │                                                                         │
-//! │   append_batch() ──────────────────────────► Direct Write ──► Disk     │
-//! │   (bypasses group commit for explicit batches)                         │
+//! │   append_batch() ─────► Direct Write ──► Disk                           │
+//! │   (bypasses group commit for explicit batches)                          │
 //! │                                                                         │
 //! └─────────────────────────────────────────────────────────────────────────┘
-//! ```
 //!
-//! ## WAL File Structure
-//!
-//! ```text
+//! WAL File Structure
 //! ┌─────────────────────────────────────────────────────────────┐
 //! │                    WAL File Layout                          │
 //! ├─────────────────────────────────────────────────────────────┤
@@ -65,17 +57,6 @@
 //! ├─────────────────────────────────────────────────────────────┤
 //! │  Entry 2...N (chained via Merkle hashes)                    │
 //! └─────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! ## Performance (Release build, 512-byte events)
-//!
-//! | Mode                      | Throughput      | Latency    |
-//! |---------------------------|-----------------|------------|
-//! | Single + sync             | 361 ops/sec     | 2.77 ms    |
-//! | Group commit + sync       | 1,223 ops/sec   | 817 μs     |
-//! | Batch API + sync          | 22,834 ops/sec  | 44 μs      |
-//! | Batch API + no sync       | 292,311 ops/sec | 3.4 μs     |
-//! 
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -102,19 +83,19 @@ const WAL_HEADER_SIZE: usize = 64;
 const ENTRY_HEADER_SIZE: usize = 32;
 const MERKLE_INFO_SIZE: usize = 96;
 
-// WAL entry types
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EntryType {
     Data = 1,
 
-    // This is a "control" entry marking a safe point in history.
-    // It tells the system "everything before this point has been
-    // successfully flushed to the main database files."
+    /// This is a "control" entry marking a safe point in history.
+    /// It tells the system "everything before this point has been
+    /// successfully flushed to the main database files."
     Checkpoint = 2,
 
-    // This entry signals that the log was deliberately cut off
-    // or reset at this point.
+    /// This entry signals that the log was deliberately cut off
+    /// or reset at this point.
     Truncate = 3,
 }
 
@@ -156,8 +137,7 @@ pub struct WriteAheadLog {
     merkle_chain: Arc<RwLock<MerkleChain>>,
     metrics: Arc<Metrics>,
     config: WalConfig,
-    /// Channel for group commit - sends writes to background flusher
-    write_tx: mpsc::Sender<WriteRequest>,
+    write_tx: mpsc::Sender<WriteRequest>, // Channel for group commit
 }
 
 #[derive(Debug, Clone)]
@@ -166,10 +146,8 @@ pub struct WalConfig {
     pub sync_on_write: bool,
     pub compression: bool,
     pub buffer_size: usize,
-    /// Max time to wait for batch to fill before flushing (microseconds)
-    pub group_commit_delay_us: u64,
-    /// Max entries per batch before forcing flush
-    pub max_batch_size: usize,
+    pub group_commit_delay_us: u64, // Max time to wait for batch to fill before flushing (in ms)
+    pub max_batch_size: usize, // Max entries per batch before forcing flush
 }
 
 impl Default for WalConfig {
@@ -179,8 +157,8 @@ impl Default for WalConfig {
             sync_on_write: true,
             compression: false,
             buffer_size: 64 * 1024, // 64KB
-            group_commit_delay_us: 1000, // 1ms
-            max_batch_size: 1000,
+            group_commit_delay_us: 2000, // 2ms
+            max_batch_size: 512,
         }
     }
 }
@@ -209,14 +187,12 @@ impl WriteAheadLog {
         
         let current_file = Arc::new(RwLock::new(current_file));
         let metrics = Arc::new(Metrics::new());
-        
-        // Create channel for group commit
-        let (write_tx, write_rx) = mpsc::channel::<WriteRequest>(config.max_batch_size * 2);
-        
-        // Spawn background group commit task
+        let (write_tx, write_rx) = mpsc::channel::<WriteRequest>(config.max_batch_size * 2); // background channel
+
         let bg_file = Arc::clone(&current_file);
         let bg_config = config.clone();
         let bg_metrics = Arc::clone(&metrics);
+
         tokio::spawn(async move {
             Self::group_commit_loop(write_rx, bg_file, bg_config, bg_metrics).await;
         });
@@ -314,7 +290,7 @@ impl WriteAheadLog {
             .unwrap()
             .as_millis() as u64;
         
-        let data = bincode::serialize(event)
+        let data = rmp_serde::to_vec(event)
             .map_err(|e| Error::WriteAheadLog {
                 message: "Failed to serialize event".to_string(),
                 source: Some(Box::new(e)),
@@ -367,7 +343,7 @@ impl WriteAheadLog {
             let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
             sequences.push(sequence);
 
-            let data = bincode::serialize(event)
+            let data = rmp_serde::to_vec(event)
                 .map_err(|e| Error::WriteAheadLog {
                     message: "Failed to serialize event".to_string(),
                     source: Some(Box::new(e)),
