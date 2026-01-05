@@ -27,6 +27,7 @@
 //! ```
 
 pub mod wal;
+pub mod wal_optimized;
 pub mod memtable;
 pub mod sstable;
 pub mod compaction;
@@ -37,4 +38,3 @@ pub mod cache;
 pub use engine::StorageEngine;
 pub use wal::WriteAheadLog;
 pub use memtable::MemTable;
-pub use sstable::SSTable;

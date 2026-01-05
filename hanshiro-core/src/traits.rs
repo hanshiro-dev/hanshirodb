@@ -10,8 +10,7 @@
 //! 4. **Testability**: Traits enable easy mocking
 
 use async_trait::async_trait;
-use std::sync::Arc;
-use crate::{Error, Result, Event, EventId, QueryRequest, Vector, VectorId};
+use crate::{Result, Event, EventId, Vector, VectorId, types::QueryRequest};
 
 /// Storage engine trait
 #[async_trait]

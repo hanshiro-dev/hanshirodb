@@ -12,7 +12,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 authors = ["Sarthak Munshi <s@hanshiro.dev>"]
-edition = "2026"
+edition = "2021"
 rust-version = "1.75.0"
 license = "Apache-2.0"
 repository = "https://github.com/hanshiro-dev/hanshirodb"
@@ -40,7 +40,6 @@ memmap2 = "0.9"
 roaring = "0.10"
 dashmap = "6.0"
 crossbeam-skiplist = "0.1"
-bloom = "0.3"
 
 # Vector processing
 candle-core = "0.8"

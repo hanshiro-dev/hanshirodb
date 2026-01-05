@@ -52,7 +52,21 @@ use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bloom::{BloomFilter, ASMS};
+// TODO: Add proper bloom filter support
+// Placeholder bloom filter for now
+struct BloomFilter;
+
+impl BloomFilter {
+    fn with_rate(_false_positive_rate: f64, _expected_items: usize) -> Self {
+        Self
+    }
+    
+    fn insert(&mut self, _key: &[u8]) {}
+    
+    fn contains(&self, _key: &[u8]) -> bool {
+        true // Always check the actual data for now
+    }
+}
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use memmap2::{Mmap, MmapOptions};

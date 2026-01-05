@@ -3,6 +3,7 @@
 //! Utility functions and helpers used throughout HanshiroDB.
 
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 
 /// Generate unique timestamp-based ID
 pub fn generate_timestamp_id() -> u64 {

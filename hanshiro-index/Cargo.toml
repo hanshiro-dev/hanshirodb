@@ -1,5 +1,5 @@
 [package]
-name = "hanshiro-storage"
+name = "hanshiro-index"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -7,7 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-# Core dependencies
 hanshiro-core = { path = "../hanshiro-core" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
@@ -16,27 +15,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
+tokio = { workspace = true }
 
-# Storage dependencies
-rocksdb = { workspace = true }
-bincode = { workspace = true }
-memmap2 = { workspace = true }
-crossbeam-skiplist = { workspace = true }
+# Index dependencies
+roaring = { workspace = true }
 dashmap = { workspace = true }
-parking_lot = "0.12"
-
-# Compression
-lz4 = "1.24"
-zstd = "0.13"
-snap = "1.1"
-
-# Utilities
-byteorder = "1.5"
-crc32fast = { workspace = true }
-blake3 = { workspace = true }
-hex = "0.4"
-rmp-serde = "1.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

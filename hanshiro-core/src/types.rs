@@ -19,7 +19,7 @@ use uuid::Uuid;
 pub type Timestamp = DateTime<Utc>;
 
 /// Unique identifier for events
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EventId(pub Uuid);
 
 impl EventId {

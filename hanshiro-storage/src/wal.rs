@@ -1,4 +1,4 @@
-//! Write-Ahead Log (WAL)
+//! # Write-Ahead Log (WAL)
 //!
 //! WAL Structure
 //! ┌─────────────────────────────────────────────────────────────┐
@@ -145,7 +145,6 @@ struct WalFile {
 
 impl WriteAheadLog {
 
-    // Create new WAL instance
     pub async fn new(wal_dir: impl AsRef<Path>, config: WalConfig) -> Result<Self> {
         let wal_dir = wal_dir.as_ref().to_path_buf();
         
@@ -167,22 +166,19 @@ impl WriteAheadLog {
         })
     }
     
-    /// Append event to WAL
     pub async fn append(&self, event: &Event) -> Result<u64> {
-        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst); // unique, thread-safe sequence number
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
         
-        // Serialize event
         let data = bincode::serialize(event)
             .map_err(|e| Error::WriteAheadLog {
                 message: "Failed to serialize event".to_string(),
                 source: Some(Box::new(e)),
             })?;
         
-        // Create Merkle node
         let merkle = {
             let mut chain = self.merkle_chain.write();
             chain.add(&data)
@@ -196,36 +192,27 @@ impl WriteAheadLog {
             merkle,
         };
         
-        // Write to file
+
         self.write_entry(&entry).await?;
-        
-        // Record metrics
         self.metrics.record_wal_write(entry.data.len() as u64);
         
         Ok(sequence)
     }
     
-    /// Write entry to WAL file
     async fn write_entry(&self, entry: &WalEntry) -> Result<()> {
         let mut should_rotate = false;
         
-        // Write to current file
         {
             let mut wal_file = self.current_file.write();
             
-            // Check if we need to rotate
             if wal_file.size >= self.config.max_file_size {
                 should_rotate = true;
             } else {
-                // Write entry
                 Self::write_entry_to_file(&mut wal_file.file, entry)?;
-                
-                // Update file metadata
                 wal_file.size += Self::entry_size(entry) as u64;
                 wal_file.entry_count += 1;
                 wal_file.last_sequence = entry.sequence;
                 
-                // Sync if configured
                 if self.config.sync_on_write {
                     wal_file.file.flush()?;
                     wal_file.file.get_ref().sync_all()?;
@@ -233,10 +220,9 @@ impl WriteAheadLog {
             }
         }
         
-        // Rotate file if needed
+        // Rotate the file if needed and retry writing the entry
         if should_rotate {
             self.rotate_file().await?;
-            // Retry write to new file
             Box::pin(self.write_entry(entry)).await?;
         }
         
@@ -263,16 +249,22 @@ impl WriteAheadLog {
         // Calculate and write CRC32
         let crc = crc32_checksum(&entry.data);
         cursor.write_u32::<LittleEndian>(crc)?;
+        cursor.write_all(&[0u8; 6])?; // Reserved bytes
         
         // Write header
         writer.write_all(&header_buf)?;
         
-        // Write Merkle info
-        writer.write_all(entry.merkle.prev_hash.as_ref()
-            .map(|h| h.as_bytes())
-            .unwrap_or(&[0u8; 32]))?;
-        writer.write_all(entry.merkle.hash.as_bytes())?;
-        writer.write_all(entry.merkle.data_hash.as_bytes())?;
+        // Write Merkle info (hash strings are hex encoded, need to decode back to 32 bytes)
+        let prev_hash_bytes = entry.merkle.prev_hash.as_ref()
+            .map(|h| hex::decode(h).unwrap())
+            .unwrap_or_else(|| vec![0u8; 32]);
+        writer.write_all(&prev_hash_bytes)?;
+        
+        let hash_bytes = hex::decode(&entry.merkle.hash).unwrap();
+        writer.write_all(&hash_bytes)?;
+        
+        let data_hash_bytes = hex::decode(&entry.merkle.data_hash).unwrap();
+        writer.write_all(&data_hash_bytes)?;
         
         // Write payload
         writer.write_all(&entry.data)?;
@@ -444,7 +436,16 @@ impl WriteAheadLog {
     /// Read entry from file
     fn read_entry(reader: &mut impl Read) -> Result<WalEntry> {
         // Read entry header
-        let length = reader.read_u32::<LittleEndian>()? as usize;
+        let length = match reader.read_u32::<LittleEndian>() {
+            Ok(len) => len as usize,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(Error::WriteAheadLog {
+                    message: "EOF reached".to_string(),
+                    source: Some(Box::new(e)),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
         let sequence = reader.read_u64::<LittleEndian>()?;
         let timestamp = reader.read_u64::<LittleEndian>()?;
         let entry_type = EntryType::try_from(reader.read_u8()?)?;
@@ -494,24 +495,95 @@ impl WriteAheadLog {
     
     /// Read all entries from a specific sequence
     pub async fn read_from(&self, start_sequence: u64) -> Result<Vec<WalEntry>> {
-        let mut entries = Vec::new();
+        let mut all_entries = Vec::new();
+        let mut seen_sequences = std::collections::HashSet::new();
         
-        // Read from current file
-        let current_file = self.current_file.read();
-        if current_file.first_sequence <= start_sequence {
-            // Read entries from current file
-            let file = current_file.file.get_ref().try_clone()?;
+        // First, get list of all WAL files sorted by sequence
+        let mut wal_files = self.list_wal_files().await?;
+        wal_files.sort_by_key(|f| f.0); // Sort by sequence number
+        
+        // Get current file path to avoid reading it twice
+        let current_file_path = {
+            let current = self.current_file.read();
+            // Get the current file's sequence number from the path
+            if let Some(name) = current.path.file_stem() {
+                name.to_string_lossy().parse::<u64>().ok()
+            } else {
+                None
+            }
+        };
+        
+        // Read from each file that might contain entries >= start_sequence
+        for (_file_seq, path) in wal_files {
+            // Skip if this is the current file (we'll read it last with proper flushing)
+            if let Some(current_seq) = current_file_path {
+                if let Some(name) = path.file_stem() {
+                    if let Ok(seq) = name.to_string_lossy().parse::<u64>() {
+                        if seq == current_seq {
+                            continue;
+                        }
+                    }
+                }
+            }
+            
+            // Open and read header to check sequence range
+            let file = File::open(&path)?;
             let mut reader = BufReader::new(file);
+            
+            // Skip header validation for now - just position after header
             reader.seek(SeekFrom::Start(WAL_HEADER_SIZE as u64))?;
             
+            // Read all entries from this file
             while let Ok(entry) = Self::read_entry(&mut reader) {
-                if entry.sequence >= start_sequence {
-                    entries.push(entry);
+                if entry.sequence >= start_sequence && !seen_sequences.contains(&entry.sequence) {
+                    seen_sequences.insert(entry.sequence);
+                    all_entries.push(entry);
                 }
             }
         }
         
-        Ok(entries)
+        // Finally, read from current file with proper flushing
+        let (file_handle, _) = {
+            let mut current_file = self.current_file.write(); // Use write lock to ensure we can flush
+            current_file.file.flush()?;  // Flush the writer first
+            current_file.file.get_ref().sync_all()?;
+            (current_file.file.get_ref().try_clone()?, current_file.first_sequence)
+        };
+        
+        let mut reader = BufReader::new(file_handle);
+        reader.seek(SeekFrom::Start(WAL_HEADER_SIZE as u64))?;
+        
+        while let Ok(entry) = Self::read_entry(&mut reader) {
+            if entry.sequence >= start_sequence && !seen_sequences.contains(&entry.sequence) {
+                seen_sequences.insert(entry.sequence);
+                all_entries.push(entry);
+            }
+        }
+        
+        // Sort entries by sequence to ensure correct order
+        all_entries.sort_by_key(|e| e.sequence);
+        
+        Ok(all_entries)
+    }
+    
+    /// List all WAL files in the directory
+    async fn list_wal_files(&self) -> Result<Vec<(u64, PathBuf)>> {
+        let mut wal_files = Vec::new();
+        let mut entries = tokio::fs::read_dir(&self.wal_dir).await?;
+        
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension() == Some(std::ffi::OsStr::new("wal")) {
+                // Parse sequence number from filename (format: NNNNNNNNNNNNNNNNNNNN.wal)
+                if let Some(name) = path.file_stem() {
+                    if let Ok(seq) = name.to_string_lossy().parse::<u64>() {
+                        wal_files.push((seq, path));
+                    }
+                }
+            }
+        }
+        
+        Ok(wal_files)
     }
     
     /// Verify Merkle chain integrity

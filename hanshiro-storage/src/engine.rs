@@ -229,8 +229,10 @@ impl StorageEngine {
             
             // Write all entries
             for (key, entry) in entries {
-                let key_bytes = bincode::serialize(&key).unwrap();
-                let value_bytes = bincode::serialize(&entry.event).unwrap();
+                let key_bytes = bincode::serialize(&key)
+                    .map_err(|e| Error::Internal { message: e.to_string() })?;
+                let value_bytes = bincode::serialize(&entry.event)
+                    .map_err(|e| Error::Internal { message: e.to_string() })?;
                 writer.add(&key_bytes, &value_bytes)?;
             }
             
@@ -304,10 +306,12 @@ impl hanshiro_core::traits::StorageEngine for StorageEngine {
         let sstables = self.sstables.read().await;
         for info in sstables.iter().rev() {  // Check newest first
             let reader = SSTableReader::open(&info.path)?;
-            let key = bincode::serialize(&id).unwrap();
+            let key = bincode::serialize(&id)
+                .map_err(|e| Error::Internal { message: e.to_string() })?;
             
             if let Some(value) = reader.get(&key)? {
-                let event: Event = bincode::deserialize(&value)?;
+                let event: Event = bincode::deserialize(&value)
+                    .map_err(|e| Error::Internal { message: e.to_string() })?;
                 return Ok(Some(event));
             }
         }
@@ -347,7 +351,8 @@ impl hanshiro_core::traits::StorageEngine for StorageEngine {
             // In a real implementation, we'd use the index to efficiently scan
             for result in reader.iter() {
                 let (_, value) = result?;
-                let event: Event = bincode::deserialize(&value)?;
+                let event: Event = bincode::deserialize(&value)
+                    .map_err(|e| Error::Internal { message: e.to_string() })?;
                 
                 // Check if event is in time range
                 let event_ts = event.timestamp.timestamp() as u64;

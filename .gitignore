@@ -1,3 +1,5 @@
 .DS_Store
 notes.md
 .claude/
+target/
+Cargo.lock

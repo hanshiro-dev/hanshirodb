@@ -9,7 +9,6 @@
 //! 3. **Traceable**: Errors can be traced through the system
 //! 4. **Recoverable**: Distinguish between fatal and recoverable errors
 
-use std::fmt;
 use thiserror::Error;
 
 /// Result type alias for HanshiroDB operations

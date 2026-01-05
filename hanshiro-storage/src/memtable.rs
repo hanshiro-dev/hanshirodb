@@ -48,6 +48,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use hanshiro_core::{
@@ -65,7 +66,7 @@ pub struct MemTableEntry {
 }
 
 /// MemTable key (combines sequence number and event ID for uniqueness)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MemTableKey {
     pub timestamp_ns: u64,
     pub event_id: EventId,
@@ -305,9 +306,9 @@ impl MemTable {
 /// MemTable manager for handling multiple tables
 pub struct MemTableManager {
     /// Active MemTable for writes
-    active: Arc<RwLock<Arc<MemTable>>>,
+    pub active: Arc<RwLock<Arc<MemTable>>>,
     /// Immutable MemTables awaiting flush
-    immutable: Arc<RwLock<Vec<Arc<MemTable>>>>,
+    pub immutable: Arc<RwLock<Vec<Arc<MemTable>>>>,
     /// Configuration
     config: MemTableConfig,
     /// Metrics
