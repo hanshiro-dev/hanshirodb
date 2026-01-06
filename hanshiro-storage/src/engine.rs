@@ -338,9 +338,10 @@ impl StorageEngine {
 
             // Update manifest with new SSTable and checkpoint
             {
+                let checkpoint_hash = wal.get_hash_at_sequence(max_sequence).await?;
                 let mut m = manifest.lock();
                 m.add_sstable(manifest_entry);
-                m.update_checkpoint(max_sequence);
+                m.update_checkpoint(max_sequence, checkpoint_hash);
                 m.save(&config.data_dir)?;
             }
 

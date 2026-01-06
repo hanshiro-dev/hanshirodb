@@ -240,6 +240,54 @@ async fn test_wal_performance_comparison() {
         println!("  Latency: {:.2} μs/event\n", duration.as_micros() as f64 / total_events as f64);
     }
     
+    // Test 7: Verify integrity performance with file rotation
+    {
+        println!("Test 7: verify_integrity() with file skipping");
+        println!("{}", "-".repeat(50));
+        
+        let temp_dir = TempDir::new().unwrap();
+        // Realistic file size - 1MB per file
+        let config = WalConfig { 
+            sync_on_write: false, 
+            max_file_size: 1024 * 1024, // 1MB per file
+            ..Default::default() 
+        };
+        let wal = WriteAheadLog::new(temp_dir.path(), config).await.unwrap();
+        
+        // Write 50k events (~25MB total, ~25 files)
+        let num_events = 50_000u64;
+        let events: Vec<Event> = (0..num_events)
+            .map(|i| create_test_event_no_metadata(i, 512))
+            .collect();
+        wal.append_batch(&events).await.unwrap();
+        
+        // Count WAL files created
+        let wal_files: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "wal").unwrap_or(false))
+            .collect();
+        
+        // Checkpoint at 90% - should skip most files
+        let checkpoint_seq = (num_events as f64 * 0.9) as u64;
+        let checkpoint_hash = wal.get_hash_at_sequence(checkpoint_seq).await.unwrap();
+        
+        let start = Instant::now();
+        wal.verify_integrity().await.unwrap();
+        let full_verify_time = start.elapsed();
+        
+        let start = Instant::now();
+        wal.verify_integrity_from(checkpoint_seq, checkpoint_hash).await.unwrap();
+        let checkpoint_verify_time = start.elapsed();
+        
+        println!("  Entries: {}, WAL files: {}", num_events, wal_files.len());
+        println!("  Full verify: {:?}", full_verify_time);
+        println!("  Checkpoint verify (last {}): {:?}", num_events - checkpoint_seq, checkpoint_verify_time);
+        if checkpoint_verify_time.as_nanos() > 0 {
+            println!("  Speedup: {:.1}x faster\n", full_verify_time.as_secs_f64() / checkpoint_verify_time.as_secs_f64());
+        }
+    }
+    
     println!("{}", "=".repeat(60));
     println!("=== Performance Summary ===");
     println!("{}", "=".repeat(60));

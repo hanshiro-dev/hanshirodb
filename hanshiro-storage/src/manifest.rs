@@ -36,6 +36,8 @@ pub struct Manifest {
     /// Last WAL sequence that was flushed to SSTable
     /// On recovery, replay WAL entries > this sequence
     pub wal_checkpoint: u64,
+    /// Merkle hash at checkpoint - used to verify chain continuity
+    pub checkpoint_hash: Option<String>,
     /// All SSTable metadata
     pub sstables: Vec<SSTableManifestEntry>,
 }
@@ -61,6 +63,7 @@ impl Manifest {
         Self {
             version: 0,
             wal_checkpoint: 0,
+            checkpoint_hash: None,
             sstables: Vec::new(),
         }
     }
@@ -104,6 +107,16 @@ impl Manifest {
 
         // Read WAL checkpoint
         let wal_checkpoint = reader.read_u64::<LittleEndian>()?;
+        
+        // Read checkpoint hash length and data
+        let hash_len = reader.read_u32::<LittleEndian>()? as usize;
+        let checkpoint_hash = if hash_len > 0 {
+            let mut hash_bytes = vec![0u8; hash_len];
+            reader.read_exact(&mut hash_bytes)?;
+            Some(String::from_utf8_lossy(&hash_bytes).to_string())
+        } else {
+            None
+        };
 
         // Read SSTable count
         let sstable_count = reader.read_u32::<LittleEndian>()? as usize;
@@ -127,6 +140,7 @@ impl Manifest {
         Ok(Self {
             version: version as u64,
             wal_checkpoint,
+            checkpoint_hash,
             sstables,
         })
     }
@@ -153,6 +167,15 @@ impl Manifest {
 
             // Write WAL checkpoint
             writer.write_u64::<LittleEndian>(self.wal_checkpoint)?;
+            
+            // Write checkpoint hash
+            if let Some(ref hash) = self.checkpoint_hash {
+                let hash_bytes = hash.as_bytes();
+                writer.write_u32::<LittleEndian>(hash_bytes.len() as u32)?;
+                writer.write_all(hash_bytes)?;
+            } else {
+                writer.write_u32::<LittleEndian>(0)?;
+            }
 
             // Write SSTable count
             writer.write_u32::<LittleEndian>(self.sstables.len() as u32)?;
@@ -181,8 +204,9 @@ impl Manifest {
     }
 
     /// Update WAL checkpoint after successful flush
-    pub fn update_checkpoint(&mut self, sequence: u64) {
+    pub fn update_checkpoint(&mut self, sequence: u64, hash: Option<String>) {
         self.wal_checkpoint = sequence;
+        self.checkpoint_hash = hash;
         self.version += 1;
     }
 

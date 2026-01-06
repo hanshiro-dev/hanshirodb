@@ -20,31 +20,6 @@ HanshiroDB is a specialized vector database built from the ground up for securit
 - **Time-Travel Queries**: Reconstruct the exact state at any point in history
 - **Native SecOps Support**: Built-in parsers for OCSF, STIX/TAXII, Zeek, and more
 
-## 🏗️ Architecture Overview
-
-```
-┌─────────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Ingestion     │     │    Query     │     │   Admin     │
-│    Engine       │     │   Engine     │     │    API      │
-└────────┬────────┘     └──────┬───────┘     └──────┬──────┘
-         │                     │                      │
-         └─────────────────────┴──────────────────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    │   Core Engine       │
-                    ├─────────────────────┤
-                    │ • WAL (Merkle)     │
-                    │ • MemTable          │
-                    │ • SSTable Manager   │
-                    └─────────┬───────────┘
-                              │
-                 ┌────────────┴────────────┐
-                 │                         │
-         ┌───────┴────────┐      ┌────────┴────────┐
-         │  Vector Index   │      │ Metadata Index  │
-         │   (DiskANN)     │      │ (Roaring Bitmap)│
-         └─────────────────┘      └─────────────────┘
-```
 
 ## Quick Start
 
@@ -129,7 +104,7 @@ cargo bench
 
 HanshiroDB builds upon ideas from:
 
-- **RocksDB** - LSM-tree implementation
+- **LevelDB / RocksDB** - LSM-tree implementation 
 - **DiskANN** - Disk-based vector indexing
 - **Tantivy** - Full-text search in Rust
 - **InfluxDB** - Time-series optimization

@@ -1173,3 +1173,205 @@ async fn test_wal_recovery_appends_not_overwrites() {
         assert_eq!(entry.sequence, i as u64);
     }
 }
+
+
+// ============================================================================
+// Checkpoint-based Verification Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_verify_integrity_from_checkpoint() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+        .await
+        .unwrap();
+    
+    // Write 100 events
+    let events: Vec<Event> = (0..100).map(|i| create_test_event(i, 100)).collect();
+    wal.append_batch(&events).await.unwrap();
+    
+    // Get hash at checkpoint (sequence 50)
+    let checkpoint_hash = wal.get_hash_at_sequence(50).await.unwrap();
+    assert!(checkpoint_hash.is_some(), "Should have hash at sequence 50");
+    
+    // Verify from checkpoint - should only check entries 51-99
+    wal.verify_integrity_from(50, checkpoint_hash).await.unwrap();
+    
+    // Full verify should also pass
+    wal.verify_integrity().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_verify_integrity_from_zero_checkpoint() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+        .await
+        .unwrap();
+    
+    let events: Vec<Event> = (0..50).map(|i| create_test_event(i, 100)).collect();
+    wal.append_batch(&events).await.unwrap();
+    
+    // Verify from 0 with None hash (fresh database)
+    wal.verify_integrity_from(0, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_verify_integrity_detects_corruption_after_checkpoint() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+        .await
+        .unwrap();
+    
+    let events: Vec<Event> = (0..100).map(|i| create_test_event(i, 100)).collect();
+    wal.append_batch(&events).await.unwrap();
+    
+    // Use wrong checkpoint hash - should detect chain break
+    let wrong_hash = Some("wrong_hash_value".to_string());
+    let result = wal.verify_integrity_from(50, wrong_hash).await;
+    
+    assert!(result.is_err(), "Should detect hash mismatch at checkpoint boundary");
+}
+
+#[tokio::test]
+async fn test_iter_entries_from_skips_correctly() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+        .await
+        .unwrap();
+    
+    let events: Vec<Event> = (0..100).map(|i| create_test_event(i, 100)).collect();
+    wal.append_batch(&events).await.unwrap();
+    
+    // Iterate from sequence 90
+    let mut count = 0;
+    let mut first_seq = None;
+    for entry in wal.iter_entries_from(90).await.unwrap() {
+        let entry = entry.unwrap();
+        if first_seq.is_none() {
+            first_seq = Some(entry.sequence);
+        }
+        count += 1;
+    }
+    
+    assert_eq!(first_seq, Some(91), "First entry should be sequence 91");
+    assert_eq!(count, 9, "Should have 9 entries (91-99)");
+}
+
+#[tokio::test]
+async fn test_checkpoint_hash_continuity_across_recovery() {
+    let temp_dir = TempDir::new().unwrap();
+    
+    let checkpoint_hash;
+    
+    // Write initial batch and get checkpoint hash
+    {
+        let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+            .await
+            .unwrap();
+        
+        let events: Vec<Event> = (0..50).map(|i| create_test_event(i, 100)).collect();
+        wal.append_batch(&events).await.unwrap();
+        
+        checkpoint_hash = wal.get_hash_at_sequence(49).await.unwrap();
+    }
+    
+    // Reopen and write more
+    {
+        let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+            .await
+            .unwrap();
+        
+        let events: Vec<Event> = (50..100).map(|i| create_test_event(i, 100)).collect();
+        wal.append_batch(&events).await.unwrap();
+        
+        // Verify from checkpoint still works after recovery + new writes
+        wal.verify_integrity_from(49, checkpoint_hash.clone()).await.unwrap();
+        
+        // Full verify should also pass
+        wal.verify_integrity().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_get_hash_at_sequence_edge_cases() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+        .await
+        .unwrap();
+    
+    let events: Vec<Event> = (0..10).map(|i| create_test_event(i, 100)).collect();
+    wal.append_batch(&events).await.unwrap();
+    
+    // First entry
+    let hash_0 = wal.get_hash_at_sequence(0).await.unwrap();
+    assert!(hash_0.is_some());
+    
+    // Last entry
+    let hash_9 = wal.get_hash_at_sequence(9).await.unwrap();
+    assert!(hash_9.is_some());
+    
+    // Non-existent sequence
+    let hash_100 = wal.get_hash_at_sequence(100).await.unwrap();
+    assert!(hash_100.is_none());
+    
+    // Hashes should be different
+    assert_ne!(hash_0, hash_9);
+}
+
+#[tokio::test]
+async fn test_verify_empty_wal_from_checkpoint() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+        .await
+        .unwrap();
+    
+    // No entries written - verify from checkpoint 0 should succeed
+    wal.verify_integrity_from(0, None).await.unwrap();
+    wal.verify_integrity().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_verify_from_last_sequence() {
+    let temp_dir = TempDir::new().unwrap();
+    let wal = WriteAheadLog::new(temp_dir.path(), WalConfig::default())
+        .await
+        .unwrap();
+    
+    let events: Vec<Event> = (0..100).map(|i| create_test_event(i, 100)).collect();
+    wal.append_batch(&events).await.unwrap();
+    
+    // Checkpoint at last sequence - nothing to verify
+    let last_hash = wal.get_hash_at_sequence(99).await.unwrap();
+    wal.verify_integrity_from(99, last_hash).await.unwrap();
+}
+
+
+#[tokio::test]
+async fn test_checkpoint_verification_with_file_rotation() {
+    let temp_dir = TempDir::new().unwrap();
+    
+    // Small file size to force rotation
+    let config = WalConfig {
+        max_file_size: 10 * 1024, // 10KB per file
+        sync_on_write: false,
+        ..Default::default()
+    };
+    
+    let wal = WriteAheadLog::new(temp_dir.path(), config)
+        .await
+        .unwrap();
+    
+    // Write enough to create multiple files
+    let events: Vec<Event> = (0..500).map(|i| create_test_event(i, 256)).collect();
+    wal.append_batch(&events).await.unwrap();
+    
+    // Get checkpoint hash near the end
+    let checkpoint_hash = wal.get_hash_at_sequence(450).await.unwrap();
+    assert!(checkpoint_hash.is_some());
+    
+    // Verify from checkpoint
+    wal.verify_integrity_from(450, checkpoint_hash).await.unwrap();
+    
+    // Full verify should also work
+    wal.verify_integrity().await.unwrap();
+}
