@@ -39,6 +39,9 @@ hex = "0.4"
 rmp-serde = "1.1"
 chrono = { version = "0.4", features = ["serde"] }
 rayon = "1.10"
+crossbeam-channel = "0.5"
+crossbeam-utils = "0.8"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
