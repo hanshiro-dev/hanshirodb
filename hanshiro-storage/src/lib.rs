@@ -34,6 +34,10 @@ pub mod partitioning;
 pub mod engine;
 pub mod manifest;
 pub mod cache;
+pub mod fd;
+
+pub use compaction::{Compactor, CompactionConfig, CompactionResult};
+pub use fd::{FdConfig, FdMonitor, FdStats, SSTablePool};
 
 pub use engine::StorageEngine;
 pub use wal::WriteAheadLog;

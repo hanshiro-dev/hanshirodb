@@ -64,6 +64,7 @@ async fn test_end_to_end_flow() {
         sstable_config: SSTableConfig::default(),
         flush_interval: Duration::from_secs(1),
         compaction_interval: Duration::from_secs(300),
+        ..Default::default()
     };
     
     let engine = StorageEngineImpl::new(config).await.unwrap();
@@ -123,6 +124,7 @@ async fn test_crash_recovery() {
             sstable_config: SSTableConfig::default(),
             flush_interval: Duration::from_secs(3600), // Don't auto-flush
             compaction_interval: Duration::from_secs(300),
+        ..Default::default()
         };
         
         let engine = StorageEngineImpl::new(config).await.unwrap();
@@ -147,6 +149,7 @@ async fn test_crash_recovery() {
             sstable_config: SSTableConfig::default(),
             flush_interval: Duration::from_secs(3600),
             compaction_interval: Duration::from_secs(300),
+        ..Default::default()
         };
         
         let engine = StorageEngineImpl::new(config).await.unwrap();
@@ -172,6 +175,7 @@ async fn test_concurrent_operations() {
         sstable_config: SSTableConfig::default(),
         flush_interval: Duration::from_millis(100),
         compaction_interval: Duration::from_secs(300),
+        ..Default::default()
     };
     
     let engine = Arc::new(StorageEngineImpl::new(config).await.unwrap());
@@ -264,6 +268,7 @@ async fn test_memtable_to_sstable_flow() {
         sstable_config: SSTableConfig::default(),
         flush_interval: Duration::from_millis(50),
         compaction_interval: Duration::from_secs(300),
+        ..Default::default()
     };
     
     let engine = StorageEngineImpl::new(config).await.unwrap();
@@ -305,6 +310,7 @@ async fn test_compaction_behavior() {
         sstable_config: SSTableConfig::default(),
         flush_interval: Duration::from_millis(50),
         compaction_interval: Duration::from_secs(300),
+        ..Default::default()
     };
     
     let engine = StorageEngineImpl::new(config).await.unwrap();
@@ -340,6 +346,7 @@ async fn test_merkle_chain_integrity_across_components() {
         sstable_config: SSTableConfig::default(),
         flush_interval: Duration::from_secs(1),
         compaction_interval: Duration::from_secs(300),
+        ..Default::default()
     };
     
     let engine = StorageEngineImpl::new(config).await.unwrap();
@@ -390,6 +397,7 @@ async fn test_performance_under_load() {
         sstable_config: SSTableConfig::default(),
         flush_interval: Duration::from_millis(500),
         compaction_interval: Duration::from_secs(300),
+        ..Default::default()
     };
     
     let engine = Arc::new(StorageEngineImpl::new(config).await.unwrap());

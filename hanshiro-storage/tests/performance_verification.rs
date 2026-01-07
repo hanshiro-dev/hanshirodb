@@ -38,7 +38,8 @@ async fn test_full_stack_performance() {
             ..Default::default()
         },
         flush_interval: Duration::from_secs(5),
-        compaction_interval: Duration::from_secs(60),
+        compaction_interval: Duration::from_secs(300),
+        ..Default::default()
     };
     
     let engine = Arc::new(StorageEngineImpl::new(config).await.unwrap());

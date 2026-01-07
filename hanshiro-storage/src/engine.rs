@@ -51,6 +51,8 @@ use hanshiro_core::{
 };
 
 use crate::{
+    compaction::{Compactor, CompactionConfig},
+    fd::{FdConfig, FdMonitor, SSTablePool},
     manifest::{Manifest, SSTableManifestEntry},
     memtable::{MemTableConfig, MemTableManager},
     sstable::{SSTableConfig, SSTableInfo, SSTableReader, SSTableWriter},
@@ -64,6 +66,8 @@ pub struct StorageConfig {
     pub wal_config: WalConfig,
     pub memtable_config: MemTableConfig,
     pub sstable_config: SSTableConfig,
+    pub compaction_config: CompactionConfig,
+    pub fd_config: FdConfig,
     pub flush_interval: Duration,
     pub compaction_interval: Duration,
 }
@@ -75,8 +79,10 @@ impl Default for StorageConfig {
             wal_config: WalConfig::default(),
             memtable_config: MemTableConfig::default(),
             sstable_config: SSTableConfig::default(),
+            compaction_config: CompactionConfig::default(),
+            fd_config: FdConfig::default(),
             flush_interval: Duration::from_secs(60),
-            compaction_interval: Duration::from_secs(300),
+            compaction_interval: Duration::from_secs(30), // More aggressive for SecOps
         }
     }
 }
@@ -91,6 +97,9 @@ pub struct StorageEngine {
     metrics: Arc<Metrics>,
     shutdown: tokio::sync::watch::Sender<bool>,
     next_sstable_id: Arc<std::sync::atomic::AtomicU64>,
+    sstable_pool: Arc<SSTablePool>,
+    fd_monitor: Arc<FdMonitor>,
+    compactor: Arc<Compactor>,
 }
 
 impl StorageEngine {
@@ -158,6 +167,20 @@ impl StorageEngine {
 
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
 
+        let next_sstable_id = Arc::new(std::sync::atomic::AtomicU64::new(next_sstable_id));
+
+        // Initialize FD management
+        let sstable_pool = Arc::new(SSTablePool::new(config.fd_config.clone()));
+        let fd_monitor = Arc::new(FdMonitor::new(config.fd_config.soft_limit_ratio));
+
+        // Initialize compactor
+        let compactor = Arc::new(Compactor::new(
+            config.compaction_config.clone(),
+            config.sstable_config.clone(),
+            config.data_dir.clone(),
+            Arc::clone(&next_sstable_id),
+        ));
+
         let engine = Self {
             config,
             wal,
@@ -166,7 +189,10 @@ impl StorageEngine {
             manifest: Arc::new(Mutex::new(manifest)),
             metrics,
             shutdown: shutdown_tx,
-            next_sstable_id: Arc::new(std::sync::atomic::AtomicU64::new(next_sstable_id)),
+            next_sstable_id,
+            sstable_pool,
+            fd_monitor,
+            compactor,
         };
 
         // Start background tasks
@@ -251,6 +277,9 @@ impl StorageEngine {
 
         // Compaction task
         let sstables = Arc::clone(&self.sstables);
+        let manifest = Arc::clone(&self.manifest);
+        let compactor = Arc::clone(&self.compactor);
+        let sstable_pool = Arc::clone(&self.sstable_pool);
         let config = self.config.clone();
         let mut shutdown_rx = self.shutdown.subscribe();
 
@@ -261,7 +290,13 @@ impl StorageEngine {
             loop {
                 tokio::select! {
                     _ = compaction_interval.tick() => {
-                        if let Err(e) = Self::compact_sstables(&sstables, &config).await {
+                        if let Err(e) = Self::run_compaction(
+                            &compactor,
+                            &sstables,
+                            &manifest,
+                            &sstable_pool,
+                            &config,
+                        ).await {
                             error!("Compaction error: {:?}", e);
                         }
                     }
@@ -363,19 +398,68 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Compact SSTables
-    async fn compact_sstables(
+    /// Run compaction if needed
+    async fn run_compaction(
+        compactor: &Arc<Compactor>,
         sstables: &Arc<RwLock<Vec<SSTableInfo>>>,
-        _config: &StorageConfig,
+        manifest: &Arc<Mutex<Manifest>>,
+        sstable_pool: &Arc<SSTablePool>,
+        config: &StorageConfig,
     ) -> Result<()> {
-        let tables = sstables.read().await;
+        // Get current SSTable manifest entries
+        let manifest_entries = manifest.lock().sstables.clone();
 
-        if tables.len() < 4 {
-            return Ok(());
+        // Check if compaction is needed
+        let job = match compactor.pick_compaction(&manifest_entries) {
+            Some(job) => job,
+            None => return Ok(()),
+        };
+
+        // Execute compaction (blocking, could be moved to spawn_blocking for large files)
+        let result = compactor.execute(job.clone())?;
+
+        // Update manifest: remove old, add new
+        {
+            let mut m = manifest.lock();
+            m.remove_sstables(&result.input_ids);
+            if let Some(ref output) = result.output_sstable {
+                m.add_sstable(output.clone());
+            }
+            m.save(&config.data_dir)?;
         }
 
-        info!("Starting compaction of {} SSTables", tables.len());
-        // TODO: Implement proper compaction logic
+        // Update in-memory SSTable list
+        {
+            let mut tables = sstables.write().await;
+            tables.retain(|t| !result.input_ids.iter().any(|id| {
+                // Match by path since SSTableInfo doesn't have id
+                job.input_sstables.iter().any(|input| input.path == t.path)
+            }));
+            if let Some(ref output) = result.output_sstable {
+                tables.push(SSTableInfo {
+                    path: output.path.clone(),
+                    file_size: output.size,
+                    entry_count: output.entry_count,
+                    min_key: output.min_key.clone(),
+                    max_key: output.max_key.clone(),
+                    creation_time: output.creation_time,
+                    level: output.level,
+                });
+            }
+        }
+
+        // Remove compacted files from FD pool and disk
+        for input in &job.input_sstables {
+            sstable_pool.remove(&input.path);
+        }
+        let paths: Vec<_> = job.input_sstables.iter().map(|s| s.path.clone()).collect();
+        compactor.cleanup_inputs(&paths)?;
+
+        info!(
+            "Compaction complete: {} files merged, {} bytes reclaimed",
+            result.input_ids.len(),
+            result.bytes_read.saturating_sub(result.bytes_written)
+        );
 
         Ok(())
     }
@@ -407,6 +491,16 @@ impl StorageEngine {
     pub fn wal_checkpoint(&self) -> u64 {
         self.manifest.lock().wal_checkpoint
     }
+
+    /// Get FD statistics
+    pub fn fd_stats(&self) -> crate::fd::FdStats {
+        self.sstable_pool.stats()
+    }
+
+    /// Check FD health
+    pub fn fd_healthy(&self) -> bool {
+        self.fd_monitor.check().healthy
+    }
 }
 
 #[async_trait]
@@ -431,10 +525,10 @@ impl hanshiro_core::traits::StorageEngine for StorageEngine {
             return Ok(Some(event));
         }
 
-        // Then check SSTables (newest first)
+        // Then check SSTables (newest first) using pooled readers
         let sstables = self.sstables.read().await;
         for info in sstables.iter().rev() {
-            let reader = SSTableReader::open(&info.path)?;
+            let reader = self.sstable_pool.get(&info.path)?;
             let key = rmp_serde::to_vec(&id)
                 .map_err(|e| Error::Internal { message: e.to_string() })?;
 
@@ -531,7 +625,13 @@ impl hanshiro_core::traits::StorageEngine for StorageEngine {
     async fn compact(&self) -> Result<CompactionResult> {
         let start = std::time::Instant::now();
 
-        Self::compact_sstables(&self.sstables, &self.config).await?;
+        Self::run_compaction(
+            &self.compactor,
+            &self.sstables,
+            &self.manifest,
+            &self.sstable_pool,
+            &self.config,
+        ).await?;
 
         Ok(CompactionResult {
             files_compacted: 0,

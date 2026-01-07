@@ -55,7 +55,8 @@ async fn test_achieve_200k_events_per_sec() {
             index_interval: 256,
         },
         flush_interval: Duration::from_secs(120),
-        compaction_interval: Duration::from_secs(600),
+        compaction_interval: Duration::from_secs(300),
+        ..Default::default()
     };
     
     let engine = Arc::new(StorageEngineImpl::new(config).await.unwrap());
@@ -237,6 +238,7 @@ async fn test_sharding_for_extreme_performance() {
             },
             flush_interval: Duration::from_secs(60),
             compaction_interval: Duration::from_secs(300),
+        ..Default::default()
         };
         
         let engine = Arc::new(StorageEngineImpl::new(config).await.unwrap());
