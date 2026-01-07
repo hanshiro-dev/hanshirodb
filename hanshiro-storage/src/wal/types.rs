@@ -47,6 +47,12 @@ pub struct WalEntry {
     pub merkle: MerkleNode,
 }
 
+impl AsRef<WalEntry> for WalEntry {
+    fn as_ref(&self) -> &WalEntry {
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WalConfig {
     pub max_file_size: u64,

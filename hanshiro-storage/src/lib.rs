@@ -37,4 +37,4 @@ pub mod cache;
 
 pub use engine::StorageEngine;
 pub use wal::WriteAheadLog;
-pub use memtable::MemTable;
+pub use memtable::{MemTable, MemTableManager};

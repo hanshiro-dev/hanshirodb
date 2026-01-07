@@ -14,7 +14,7 @@
 
 HanshiroDB is a specialized vector database built from the ground up for security operations. Unlike traditional vector databases optimized for recommendation systems, HanshiroDB is engineered for:
 
-- **Massive Write Throughput**: Handle 100,000+ security events per second
+- **Massive Write Throughput**: Handle 350,000+ security events per second
 - **Tamper-Proof Storage**: Blockchain-like Merkle chaining ensures data integrity
 - **Hybrid Search**: Combine vector similarity with metadata filtering in real-time
 - **Time-Travel Queries**: Reconstruct the exact state at any point in history

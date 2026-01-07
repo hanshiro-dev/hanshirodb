@@ -53,6 +53,41 @@ impl MerkleChain {
         }
     }
     
+    /// Get the last hash in the chain
+    pub fn get_last_hash(&self) -> Option<String> {
+        self.current_hash.clone()
+    }
+    
+    /// Set the last hash (used for parallel processing)
+    pub fn set_last_hash(&mut self, hash: String) {
+        self.current_hash = Some(hash);
+        self.sequence += 1;
+    }
+    
+    /// Compute hash for data with optional previous hash
+    pub fn compute_hash(&self, data: &[u8], prev_hash: Option<&str>) -> String {
+        // Hash the data
+        let data_hash = blake3::hash(data).to_hex().to_string();
+        
+        // Create chain hash
+        let mut chain_hasher = Hasher::new();
+        
+        // Include previous hash if exists
+        if let Some(prev) = prev_hash {
+            chain_hasher.update(prev.as_bytes());
+            chain_hasher.update(b"|");
+        }
+        
+        // Include data hash
+        chain_hasher.update(data_hash.as_bytes());
+        
+        // Include sequence number
+        chain_hasher.update(&self.sequence.to_le_bytes());
+        
+        // Finalize hash
+        hex::encode(chain_hasher.finalize().as_bytes())
+    }
+    
     /// Add data to chain
     pub fn add(&mut self, data: &[u8]) -> MerkleNode {
         // Hash the data

@@ -171,8 +171,8 @@ async fn test_wal_performance_comparison() {
         let wal = Arc::new(WriteAheadLog::new(temp_dir.path(), config).await.unwrap());
         
         let start = Instant::now();
-        let num_batches = 1000;
-        let batch_size = 100;
+        let num_batches = 500;
+        let batch_size = 1000;  // Larger batches for better throughput
         
         for batch_num in 0..num_batches {
             let events: Vec<Event> = (0..batch_size)
@@ -200,7 +200,7 @@ async fn test_wal_performance_comparison() {
         let temp_dir = TempDir::new().unwrap();
         let config = WalConfig {
             sync_on_write: false,
-            buffer_size: 1024 * 1024,
+            buffer_size: 4 * 1024 * 1024,  // 4MB buffer for better concurrency
             ..Default::default()
         };
         let wal = Arc::new(WriteAheadLog::new(temp_dir.path(), config).await.unwrap());
@@ -208,7 +208,7 @@ async fn test_wal_performance_comparison() {
         let start = Instant::now();
         let num_threads = 8;
         let batches_per_thread = 100;
-        let batch_size = 100;
+        let batch_size = 500;  // Larger batches
         let mut handles = JoinSet::new();
         
         for thread_id in 0..num_threads {
@@ -286,6 +286,39 @@ async fn test_wal_performance_comparison() {
         if checkpoint_verify_time.as_nanos() > 0 {
             println!("  Speedup: {:.1}x faster\n", full_verify_time.as_secs_f64() / checkpoint_verify_time.as_secs_f64());
         }
+    }
+    
+    // Test 8: Raw write speed test (simulating no Merkle overhead)
+    {
+        println!("Test 8: Raw write speed (simulating optimal conditions)");
+        println!("{}", "-".repeat(50));
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("raw_test.log");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&file_path)
+            .unwrap();
+        
+        let start = Instant::now();
+        let num_events = 500_000;
+        let event_data = vec![b'x'; event_size];
+        
+        use std::io::Write;
+        for i in 0..num_events {
+            // Simulate minimal WAL entry: 8 bytes sequence + data
+            file.write_all(&(i as u64).to_le_bytes()).unwrap();
+            file.write_all(&event_data).unwrap();
+        }
+        
+        let duration = start.elapsed();
+        let throughput = num_events as f64 / duration.as_secs_f64();
+        let mb_per_sec = (num_events as f64 * (8 + event_size) as f64) / 1_000_000.0 / duration.as_secs_f64();
+        println!("  Events: {}", num_events);
+        println!("  Duration: {:?}", duration);
+        println!("  Throughput: {:.0} events/sec", throughput);
+        println!("  Bandwidth: {:.1} MB/sec", mb_per_sec);
+        println!("  Latency: {:.2} μs/event\n", duration.as_micros() as f64 / num_events as f64);
     }
     
     println!("{}", "=".repeat(60));

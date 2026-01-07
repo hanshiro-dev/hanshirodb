@@ -70,13 +70,13 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
 use hanshiro_core::{
-    crypto::MerkleChain,
+    crypto::{MerkleChain, MerkleNode},
     error::{Error, Result},
     metrics::Metrics,
     Event,
 };
 
-use file::{create_file, entry_size, finalize_header, read_entry, recover_file, write_entry, WalFile, read_header_last_sequence};
+use file::{create_file, entry_size, finalize_header, read_entry, recover_file, write_entries_batch, WalFile, read_header_last_sequence};
 use types::{WAL_HEADER_SIZE};
 
 
@@ -156,10 +156,8 @@ impl WriteAheadLog {
             return Ok(vec![]);
         }
 
-        let entries: Vec<WalEntry> = events
-            .iter()
-            .map(|e| self.create_entry(e))
-            .collect::<Result<_>>()?;
+        // Use parallel batch creation for better performance
+        let entries = self.create_entries_batch(events)?;
         let sequences: Vec<u64> = entries.iter().map(|e| e.sequence).collect();
 
         self.write_batch(&entries).await?;
@@ -314,25 +312,85 @@ impl WriteAheadLog {
         })
     }
 
-    async fn write_batch(&self, entries: &[WalEntry]) -> Result<()> {
-        for entry in entries {
-            let needs_rotation = {
-                let f = self.current_file.read();
-                f.size + entry_size(entry) as u64 > self.config.max_file_size
+    /// Create entries in parallel for better performance with large batches
+    fn create_entries_batch(&self, events: &[Event]) -> Result<Vec<WalEntry>> {
+        use rayon::prelude::*;
+        
+        // First, serialize all events and reserve sequences
+        let start_sequence = self.sequence.fetch_add(events.len() as u64, Ordering::SeqCst);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        // Parallel serialization and hashing
+        let serialized: Vec<(u64, Vec<u8>, String)> = events
+            .par_iter()
+            .enumerate()
+            .map(|(i, event)| {
+                let sequence = start_sequence + i as u64;
+                let data = rmp_serde::to_vec(event).map_err(|e| Error::WriteAheadLog {
+                    message: "Serialization failed".to_string(),
+                    source: Some(Box::new(e)),
+                })?;
+                
+                // Compute data hash in parallel
+                let data_hash = blake3::hash(&data).to_hex().to_string();
+                
+                Ok((sequence, data, data_hash))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        
+        // Update Merkle chain sequentially (required for chain integrity)
+        let mut merkle_chain = self.merkle_chain.write();
+        let mut entries = Vec::with_capacity(events.len());
+        
+        for (sequence, data, data_hash) in serialized {
+            let prev_hash = merkle_chain.get_last_hash();
+            let hash = merkle_chain.compute_hash(&data, prev_hash.as_deref());
+            
+            let merkle = MerkleNode {
+                hash: hash.clone(),
+                prev_hash: prev_hash,
+                data_hash,
+                sequence,
             };
-            if needs_rotation {
-                self.rotate().await?;
-            }
+            
+            merkle_chain.set_last_hash(hash);
+            
+            entries.push(WalEntry {
+                sequence,
+                timestamp,
+                entry_type: EntryType::Data,
+                data: Bytes::from(data),
+                merkle,
+            });
+        }
+        
+        Ok(entries)
+    }
 
-            let mut f = self.current_file.write();
-            write_entry(&mut f.file, entry)?;
-            f.size += entry_size(entry) as u64;
-            f.entry_count += 1;
-            f.last_sequence = entry.sequence;
+    async fn write_batch(&self, entries: &[WalEntry]) -> Result<()> {
+        // Check if rotation needed based on total batch size
+        let total_batch_size: u64 = entries.iter().map(|e| entry_size(e) as u64).sum();
+        let needs_rotation = {
+            let f = self.current_file.read();
+            f.size + total_batch_size > self.config.max_file_size
+        };
+        if needs_rotation {
+            self.rotate().await?;
+        }
+
+        // Use optimized batch write
+        let mut f = self.current_file.write();
+        write_entries_batch(&mut f.file, entries)?;
+        f.size += total_batch_size;
+        f.entry_count += entries.len() as u64;
+        if let Some(last_entry) = entries.last() {
+            f.last_sequence = last_entry.sequence;
         }
 
         if self.config.sync_on_write {
-            let mut f = self.current_file.write();
             f.file.flush()?;
             f.file.get_ref().sync_all()?;
         }
@@ -447,9 +505,9 @@ impl WriteAheadLog {
 }
 
 
-//!===============================
-//! Synchronous helper routines
-//!===============================
+//===============================
+// Synchronous helper routines
+//===============================
 
 fn write_batch_sync(
     current_file: &Arc<RwLock<WalFile>>,
@@ -457,24 +515,29 @@ fn write_batch_sync(
     config: &WalConfig,
     wal_dir: &Path,
 ) -> Result<()> {
-    for req in batch {
-        let needs_rotation = {
-            let f = current_file.read();
-            f.size + entry_size(&req.entry) as u64 > config.max_file_size
-        };
-        if needs_rotation {
-            rotate_sync(current_file, wal_dir, config)?;
-        }
+    // Extract entries from requests
+    let entries: Vec<&WalEntry> = batch.iter().map(|req| &req.entry).collect();
+    
+    // Check if rotation needed based on total batch size
+    let total_batch_size: u64 = entries.iter().map(|e| entry_size(e) as u64).sum();
+    let needs_rotation = {
+        let f = current_file.read();
+        f.size + total_batch_size > config.max_file_size
+    };
+    if needs_rotation {
+        rotate_sync(current_file, wal_dir, config)?;
+    }
 
-        let mut f = current_file.write();
-        write_entry(&mut f.file, &req.entry)?;
-        f.size += entry_size(&req.entry) as u64;
-        f.entry_count += 1;
-        f.last_sequence = req.entry.sequence;
+    // Use optimized batch write
+    let mut f = current_file.write();
+    write_entries_batch(&mut f.file, &entries)?;
+    f.size += total_batch_size;
+    f.entry_count += entries.len() as u64;
+    if let Some(last_entry) = entries.last() {
+        f.last_sequence = last_entry.sequence;
     }
 
     if config.sync_on_write {
-        let mut f = current_file.write();
         f.file.flush()?;
         f.file.get_ref().sync_all()?;
     }
