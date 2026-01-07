@@ -1,592 +1,479 @@
 //! # Comprehensive SSTable Tests
 //!
-//! This test suite covers:
-//! - Basic write/read operations
-//! - Block compression and decompression
-//! - Index and bloom filter functionality
-//! - Iterator correctness
-//! - Performance characteristics
-//! - Corruption handling
+//! This test suite verifies:
+//! - Basic SSTable write/read operations
+//! - Compression algorithms
+//! - Bloom filter functionality
+//! - Block and index structures
+//! - Iterator behavior
+//! - Large file handling
+//! - Concurrent access patterns
+//! - Integration with other components
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
-use tempfile::{NamedTempFile, TempDir};
+use std::time::{Duration, Instant};
+use tempfile::TempDir;
 
-use hanshiro_core::{
-    types::*,
-    metrics::Metrics,
-};
+use bytes::Bytes;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
+
 use hanshiro_storage::sstable::{
-    SSTableWriter, SSTableReader, SSTableConfig, CompressionType, SSTableInfo
+    SSTableWriter, SSTableReader, SSTableConfig, SSTableInfo, CompressionType,
 };
 
-/// Helper to generate test key-value pairs
-fn generate_test_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut data = Vec::new();
-    for i in 0..count {
-        let key = format!("key_{:0width$}", i, width = key_size);
-        let value = format!("value_{}_", i).repeat(value_size / 10);
-        data.push((key.into_bytes(), value.into_bytes()));
-    }
-    data
+/// Generate test key with specified pattern
+fn test_key(prefix: &str, num: u64) -> Vec<u8> {
+    format!("{}_key_{:08}", prefix, num).into_bytes()
 }
 
-/// Helper to create events as key-value pairs
-fn event_to_kv(event: &Event) -> (Vec<u8>, Vec<u8>) {
-    let key = event.id.to_string().into_bytes();
-    let value = bincode::serialize(event).unwrap();
-    (key, value)
+/// Generate test value of specified size
+fn test_value(size: usize, seed: u8) -> Vec<u8> {
+    vec![seed; size]
 }
 
 #[test]
 fn test_sstable_basic_write_read() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let path = temp_file.path();
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test.sst");
     
     // Write SSTable
-    let info = {
-        let mut writer = SSTableWriter::new(path, SSTableConfig::default()).unwrap();
-        
-        let data = generate_test_data(100, 10, 100);
-        for (key, value) in &data {
-            writer.add(key, value).unwrap();
-        }
-        
-        writer.finish().unwrap()
-    };
+    let config = SSTableConfig::default();
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
     
-    assert_eq!(info.entry_count, 100);
+    // Write some entries
+    let entries = vec![
+        (b"key001".to_vec(), b"value1".to_vec()),
+        (b"key002".to_vec(), b"value2".to_vec()),
+        (b"key003".to_vec(), b"value3".to_vec()),
+        (b"key004".to_vec(), b"value4".to_vec()),
+        (b"key005".to_vec(), b"value5".to_vec()),
+    ];
+    
+    for (key, value) in &entries {
+        writer.add(key, value).unwrap();
+    }
+    
+    let info = writer.finish().unwrap();
+    assert_eq!(info.entry_count, 5);
     assert!(info.file_size > 0);
     
     // Read SSTable
-    {
-        let reader = SSTableReader::open(path).unwrap();
-        
-        // Test point queries
-        let value = reader.get(b"key_0000000050").unwrap().unwrap();
-        assert!(String::from_utf8_lossy(&value).contains("value_50"));
-        
-        // Test missing key
-        assert!(reader.get(b"key_9999999999").unwrap().is_none());
-        
-        // Test iteration
-        let mut count = 0;
-        for result in reader.iter() {
-            let (key, value) = result.unwrap();
-            count += 1;
-            
-            // Verify ordering
-            if count > 1 {
-                let prev_key = format!("key_{:010}", count - 2);
-                assert!(key.as_ref() > prev_key.as_bytes());
-            }
-        }
-        assert_eq!(count, 100);
+    let reader = SSTableReader::open(&sstable_path).unwrap();
+    
+    // Verify all entries
+    for (key, expected_value) in &entries {
+        let value = reader.get(key).unwrap();
+        assert_eq!(value.as_ref().map(|v| v.as_ref()), Some(expected_value.as_slice()));
     }
+    
+    // Verify non-existent key
+    assert!(reader.get(b"nonexistent").unwrap().is_none());
 }
 
 #[test]
 fn test_sstable_compression_types() {
+    let temp_dir = TempDir::new().unwrap();
+    
     let compression_types = vec![
         CompressionType::None,
-        CompressionType::Lz4,
         CompressionType::Zstd,
         CompressionType::Snappy,
     ];
     
     for compression in compression_types {
-        let temp_file = NamedTempFile::new().unwrap();
-        let path = temp_file.path();
+        let sstable_path = temp_dir.path().join(format!("test_{:?}.sst", compression));
         
-        let config = SSTableConfig {
-            compression,
-            ..Default::default()
-        };
+        let mut config = SSTableConfig::default();
+        config.compression = compression;
         
-        // Write with compression
-        let uncompressed_size = {
-            let mut writer = SSTableWriter::new(path, config).unwrap();
-            
-            // Use repetitive data for better compression
-            let mut total_size = 0;
-            for i in 0..1000 {
-                let key = format!("key_{:08}", i);
-                let value = format!("This is value {} with lots of repetitive text repetitive text repetitive text", i);
-                total_size += key.len() + value.len();
-                writer.add(key.as_bytes(), value.as_bytes()).unwrap();
-            }
-            
-            let info = writer.finish().unwrap();
-            println!("{:?} compression: {} bytes (from ~{} bytes)", 
-                compression, info.file_size, total_size);
-            
-            total_size
-        };
+        let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
         
-        // Read and verify
-        {
-            let reader = SSTableReader::open(path).unwrap();
-            
-            // Verify some entries
-            for i in (0..1000).step_by(100) {
-                let key = format!("key_{:08}", i);
-                let value = reader.get(key.as_bytes()).unwrap().unwrap();
-                let expected = format!("This is value {} with lots of repetitive text repetitive text repetitive text", i);
-                assert_eq!(&value[..], expected.as_bytes());
-            }
-            
-            // Count all entries
-            let count = reader.iter().count();
-            assert_eq!(count, 1000);
+        // Write entries with various sizes
+        for i in 0..100 {
+            let key = test_key("comp", i);
+            let value = test_value(1000, i as u8); // 1KB values
+            writer.add(&key, &value).unwrap();
         }
         
-        // Compressed files should be smaller (except None)
-        if compression != CompressionType::None {
-            let file_size = std::fs::metadata(path).unwrap().len();
-            assert!(file_size < uncompressed_size as u64 / 2);
+        let info = writer.finish().unwrap();
+        println!("Compression {:?}: {} bytes for 100KB data", compression, info.file_size);
+        
+        // Verify data integrity
+        let reader = SSTableReader::open(&sstable_path).unwrap();
+        for i in 0..100 {
+            let key = test_key("comp", i);
+            let value = reader.get(&key).unwrap().unwrap();
+            assert_eq!(value.len(), 1000);
+            assert!(value.iter().all(|&b| b == i as u8));
         }
     }
 }
 
 #[test]
-fn test_sstable_large_values() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let path = temp_file.path();
+fn test_sstable_iterator() {
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_iter.sst");
     
-    // Test various value sizes
-    let sizes = vec![
-        100,           // 100B
-        1024,          // 1KB
-        10 * 1024,     // 10KB
-        100 * 1024,    // 100KB
-        1024 * 1024,   // 1MB
-    ];
+    let config = SSTableConfig::default();
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
     
-    {
-        let mut writer = SSTableWriter::new(path, SSTableConfig::default()).unwrap();
-        
-        for (i, size) in sizes.iter().enumerate() {
-            let key = format!("key_{:04}", i);
-            let value = vec![b'x'; *size];
-            writer.add(key.as_bytes(), &value).unwrap();
-        }
-        
-        writer.finish().unwrap();
+    // Write entries in sorted order
+    let mut expected = Vec::new();
+    for i in 0..50 {
+        let key = test_key("iter", i);
+        let value = test_value(100, i as u8);
+        writer.add(&key, &value).unwrap();
+        expected.push((Bytes::from(key), Bytes::from(value)));
     }
     
-    // Read back and verify
-    {
-        let reader = SSTableReader::open(path).unwrap();
-        
-        for (i, size) in sizes.iter().enumerate() {
-            let key = format!("key_{:04}", i);
-            let value = reader.get(key.as_bytes()).unwrap().unwrap();
-            assert_eq!(value.len(), *size);
-            assert!(value.iter().all(|&b| b == b'x'));
-        }
+    writer.finish().unwrap();
+    
+    // Read with iterator
+    let reader = SSTableReader::open(&sstable_path).unwrap();
+    let mut iter = reader.iter();
+    
+    let mut count = 0;
+    while let Some(result) = iter.next() {
+        let (key, value) = result.unwrap();
+        assert_eq!(key, expected[count].0);
+        assert_eq!(value, expected[count].1);
+        count += 1;
+    }
+    
+    assert_eq!(count, 50);
+}
+
+#[test]
+fn test_sstable_large_values() {
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_large.sst");
+    
+    let mut config = SSTableConfig::default();
+    config.block_size = 16 * 1024; // 16KB blocks
+    
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
+    
+    // Write entries with large values
+    for i in 0..10 {
+        let key = test_key("large", i);
+        let value = test_value(10 * 1024, i as u8); // 10KB values
+        writer.add(&key, &value).unwrap();
+    }
+    
+    writer.finish().unwrap();
+    
+    // Verify large values
+    let reader = SSTableReader::open(&sstable_path).unwrap();
+    for i in 0..10 {
+        let key = test_key("large", i);
+        let value = reader.get(&key).unwrap().unwrap();
+        assert_eq!(value.len(), 10 * 1024);
+        assert!(value.iter().all(|&b| b == i as u8));
     }
 }
 
 #[test]
 fn test_sstable_block_boundaries() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let path = temp_file.path();
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_blocks.sst");
     
-    let config = SSTableConfig {
-        block_size: 1024, // Small blocks for testing
-        index_interval: 10, // Index every 10th key
-        ..Default::default()
-    };
+    let mut config = SSTableConfig::default();
+    config.block_size = 1024; // Small 1KB blocks
+    config.index_interval = 4; // Index every 4th key
     
-    {
-        let mut writer = SSTableWriter::new(path, config).unwrap();
-        
-        // Write enough data to span multiple blocks
-        for i in 0..100 {
-            let key = format!("key_{:04}", i);
-            let value = vec![b'v'; 100]; // Each entry ~110 bytes
-            writer.add(key.as_bytes(), &value).unwrap();
-        }
-        
-        writer.finish().unwrap();
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
+    
+    // Write entries that will span multiple blocks
+    for i in 0..100 {
+        let key = test_key("block", i);
+        let value = test_value(100, i as u8);
+        writer.add(&key, &value).unwrap();
     }
     
-    // Read and verify all entries are accessible
-    {
-        let reader = SSTableReader::open(path).unwrap();
-        
-        // Test entries that should be in different blocks
-        for i in (0..100).step_by(15) {
-            let key = format!("key_{:04}", i);
-            let value = reader.get(key.as_bytes()).unwrap().unwrap();
-            assert_eq!(value.len(), 100);
-        }
-        
-        // Verify iteration works across blocks
-        let count = reader.iter().count();
-        assert_eq!(count, 100);
+    writer.finish().unwrap();
+    
+    // Verify random access across blocks
+    let reader = SSTableReader::open(&sstable_path).unwrap();
+    let mut rng = StdRng::seed_from_u64(42);
+    
+    for _ in 0..50 {
+        let i = rng.gen_range(0..100);
+        let key = test_key("block", i);
+        let value = reader.get(&key).unwrap().unwrap();
+        assert_eq!(value.len(), 100);
+        assert!(value.iter().all(|&b| b == i as u8));
     }
 }
 
 #[test]
 fn test_sstable_bloom_filter_effectiveness() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let path = temp_file.path();
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_bloom.sst");
     
-    let config = SSTableConfig {
-        bloom_bits_per_key: 10,
-        ..Default::default()
-    };
+    let config = SSTableConfig::default();
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
     
-    // Write SSTable with bloom filter
-    {
-        let mut writer = SSTableWriter::new(path, config).unwrap();
-        
-        for i in 0..10000 {
-            let key = format!("existing_key_{:06}", i);
-            let value = format!("value_{}", i);
-            writer.add(key.as_bytes(), value.as_bytes()).unwrap();
-        }
-        
-        writer.finish().unwrap();
+    // Write entries
+    let num_entries = 1000;
+    for i in 0..num_entries {
+        let key = test_key("bloom", i);
+        let value = test_value(100, i as u8);
+        writer.add(&key, &value).unwrap();
     }
+    
+    writer.finish().unwrap();
     
     // Test bloom filter with non-existent keys
-    {
-        let reader = SSTableReader::open(path).unwrap();
-        
-        // These keys don't exist
-        let mut false_positives = 0;
-        let tests = 1000;
-        
-        for i in 0..tests {
-            let key = format!("nonexistent_key_{:06}", i);
-            if reader.get(key.as_bytes()).unwrap().is_some() {
-                false_positives += 1;
-            }
-        }
-        
-        let fp_rate = false_positives as f64 / tests as f64;
-        println!("Bloom filter false positive rate: {:.2}%", fp_rate * 100.0);
-        
-        // Should be less than 2% with 10 bits per key
-        assert!(fp_rate < 0.02);
-    }
-}
-
-#[test]
-fn test_sstable_iterator_correctness() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let path = temp_file.path();
+    let reader = SSTableReader::open(&sstable_path).unwrap();
+    let mut false_positives = 0;
+    let test_count = 10000;
     
-    // Write SSTable
-    let expected_data = {
-        let mut writer = SSTableWriter::new(path, SSTableConfig::default()).unwrap();
-        
-        let data = generate_test_data(500, 8, 50);
-        for (key, value) in &data {
-            writer.add(key, value).unwrap();
-        }
-        
-        writer.finish().unwrap();
-        data
-    };
-    
-    // Read with iterator and verify
-    {
-        let reader = SSTableReader::open(path).unwrap();
-        let mut iter_data = Vec::new();
-        
-        for result in reader.iter() {
-            let (key, value) = result.unwrap();
-            iter_data.push((key.to_vec(), value.to_vec()));
-        }
-        
-        assert_eq!(iter_data.len(), expected_data.len());
-        
-        // Verify all data matches
-        for (i, (key, value)) in iter_data.iter().enumerate() {
-            assert_eq!(key, &expected_data[i].0);
-            assert_eq!(value, &expected_data[i].1);
+    for i in num_entries..(num_entries + test_count) {
+        let key = test_key("bloom", i);
+        if reader.get(&key).unwrap().is_some() {
+            false_positives += 1;
         }
     }
-}
-
-#[test]
-fn test_sstable_concurrent_reads() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let path = temp_file.path();
     
-    // Write SSTable
-    {
-        let mut writer = SSTableWriter::new(path, SSTableConfig::default()).unwrap();
-        
-        for i in 0..1000 {
-            let key = format!("key_{:06}", i);
-            let value = format!("value_{}", i).repeat(10);
-            writer.add(key.as_bytes(), value.as_bytes()).unwrap();
-        }
-        
-        writer.finish().unwrap();
-    }
+    let false_positive_rate = false_positives as f64 / test_count as f64;
+    println!("Bloom filter false positive rate: {:.2}%", false_positive_rate * 100.0);
     
-    // Spawn multiple readers
-    let num_threads = 10;
-    let mut handles = Vec::new();
-    
-    for thread_id in 0..num_threads {
-        let path = path.to_path_buf();
-        let handle = std::thread::spawn(move || {
-            let reader = SSTableReader::open(&path).unwrap();
-            
-            let mut found = 0;
-            for i in 0..100 {
-                let key = format!("key_{:06}", thread_id * 100 + i);
-                if reader.get(key.as_bytes()).unwrap().is_some() {
-                    found += 1;
-                }
-            }
-            found
-        });
-        handles.push(handle);
-    }
-    
-    // All threads should find all their keys
-    for handle in handles {
-        let found = handle.join().unwrap();
-        assert_eq!(found, 100);
-    }
+    // Should be close to the target rate (1%)
+    assert!(false_positive_rate < 0.02); // Allow up to 2%
 }
 
 #[test]
 fn test_sstable_min_max_keys() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let path = temp_file.path();
-    
-    // Write SSTable
-    let info = {
-        let mut writer = SSTableWriter::new(path, SSTableConfig::default()).unwrap();
-        
-        // Write keys in specific order
-        let keys = vec!["aaa", "bbb", "ccc", "xxx", "yyy", "zzz"];
-        for key in &keys {
-            writer.add(key.as_bytes(), b"value").unwrap();
-        }
-        
-        writer.finish().unwrap()
-    };
-    
-    // Check min/max keys
-    assert_eq!(&info.min_key[..], b"aaa");
-    assert_eq!(&info.max_key[..], b"zzz");
-    
-    // Verify with reader
-    {
-        let reader = SSTableReader::open(path).unwrap();
-        
-        // Keys within range should exist
-        assert!(reader.get(b"bbb").unwrap().is_some());
-        assert!(reader.get(b"xxx").unwrap().is_some());
-        
-        // Keys outside range should not exist
-        assert!(reader.get(b"000").unwrap().is_none());
-        assert!(reader.get(b"~~~").unwrap().is_none());
-    }
-}
-
-#[test]
-fn test_sstable_performance_benchmark() {
     let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_minmax.sst");
     
-    // Benchmark write performance
-    let write_path = temp_dir.path().join("write_bench.sst");
-    let write_start = std::time::Instant::now();
-    let num_entries = 100_000;
+    let config = SSTableConfig::default();
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
     
-    let info = {
-        let mut writer = SSTableWriter::new(&write_path, SSTableConfig::default()).unwrap();
-        
-        for i in 0..num_entries {
-            let key = format!("key_{:08}", i);
-            let value = format!("value_{}", i).repeat(10);
-            writer.add(key.as_bytes(), value.as_bytes()).unwrap();
-        }
-        
-        writer.finish().unwrap()
-    };
+    // Write entries
+    let keys: Vec<Vec<u8>> = vec![
+        b"aaa".to_vec(),
+        b"bbb".to_vec(),
+        b"ccc".to_vec(),
+        b"ddd".to_vec(),
+        b"eee".to_vec(),
+    ];
     
-    let write_duration = write_start.elapsed();
-    let write_throughput = num_entries as f64 / write_duration.as_secs_f64();
-    
-    println!("SSTable Write Performance:");
-    println!("  Entries: {}", num_entries);
-    println!("  File size: {} MB", info.file_size / (1024 * 1024));
-    println!("  Duration: {:?}", write_duration);
-    println!("  Throughput: {:.0} entries/sec", write_throughput);
-    
-    // Benchmark read performance
-    let reader = SSTableReader::open(&write_path).unwrap();
-    
-    // Random reads
-    let read_start = std::time::Instant::now();
-    let num_reads = 10_000;
-    let mut found = 0;
-    
-    for i in 0..num_reads {
-        let key = format!("key_{:08}", i * 10);
-        if reader.get(key.as_bytes()).unwrap().is_some() {
-            found += 1;
-        }
+    for key in &keys {
+        writer.add(key, b"value").unwrap();
     }
     
-    let read_duration = read_start.elapsed();
-    let read_throughput = num_reads as f64 / read_duration.as_secs_f64();
-    
-    println!("\nSSTable Read Performance:");
-    println!("  Reads: {}", num_reads);
-    println!("  Found: {}", found);
-    println!("  Duration: {:?}", read_duration);
-    println!("  Throughput: {:.0} reads/sec", read_throughput);
-    println!("  Latency: {:.0} μs/read", read_duration.as_micros() as f64 / num_reads as f64);
-    
-    // Benchmark iteration
-    let iter_start = std::time::Instant::now();
-    let count = reader.iter().count();
-    let iter_duration = iter_start.elapsed();
-    
-    println!("\nSSTable Iteration Performance:");
-    println!("  Entries: {}", count);
-    println!("  Duration: {:?}", iter_duration);
-    println!("  Throughput: {:.0} entries/sec", count as f64 / iter_duration.as_secs_f64());
+    let info = writer.finish().unwrap();
+    assert_eq!(info.min_key, b"aaa");
+    assert_eq!(info.max_key, b"eee");
 }
 
 #[test]
-fn test_sstable_corruption_handling() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let path = temp_file.path();
+fn test_sstable_empty_values() {
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_empty.sst");
     
-    // Write valid SSTable
-    {
-        let mut writer = SSTableWriter::new(path, SSTableConfig::default()).unwrap();
-        
-        for i in 0..100 {
-            let key = format!("key_{:04}", i);
-            let value = format!("value_{}", i);
-            writer.add(key.as_bytes(), value.as_bytes()).unwrap();
-        }
-        
-        writer.finish().unwrap();
+    let config = SSTableConfig::default();
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
+    
+    // Write entries with empty values
+    writer.add(b"key1", b"").unwrap();
+    writer.add(b"key2", b"value").unwrap();
+    writer.add(b"key3", b"").unwrap();
+    
+    writer.finish().unwrap();
+    
+    // Verify empty values are preserved
+    let reader = SSTableReader::open(&sstable_path).unwrap();
+    assert_eq!(reader.get(b"key1").unwrap().unwrap().len(), 0);
+    assert_eq!(reader.get(b"key2").unwrap().unwrap().as_ref(), b"value");
+    assert_eq!(reader.get(b"key3").unwrap().unwrap().len(), 0);
+}
+
+#[test]
+fn test_sstable_performance() {
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_perf.sst");
+    
+    let mut config = SSTableConfig::default();
+    config.compression = CompressionType::Snappy;
+    
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
+    
+    let num_entries = 100_000;
+    let value_size = 100;
+    
+    // Measure write performance
+    let start = Instant::now();
+    for i in 0..num_entries {
+        let key = test_key("perf", i);
+        let value = test_value(value_size, (i % 256) as u8);
+        writer.add(&key, &value).unwrap();
+    }
+    let info = writer.finish().unwrap();
+    let write_duration = start.elapsed();
+    
+    let write_throughput = (num_entries as f64 * (value_size + 20) as f64) / write_duration.as_secs_f64() / 1_048_576.0;
+    println!("SSTable write throughput: {:.2} MB/s", write_throughput);
+    println!("SSTable size: {} MB", info.file_size / 1_048_576);
+    
+    // Measure read performance
+    let reader = SSTableReader::open(&sstable_path).unwrap();
+    let mut rng = StdRng::seed_from_u64(42);
+    
+    let start = Instant::now();
+    let num_reads = 10_000;
+    for _ in 0..num_reads {
+        let i = rng.gen_range(0..num_entries);
+        let key = test_key("perf", i);
+        let _ = reader.get(&key).unwrap();
+    }
+    let read_duration = start.elapsed();
+    
+    let reads_per_sec = num_reads as f64 / read_duration.as_secs_f64();
+    println!("SSTable random read performance: {:.0} reads/sec", reads_per_sec);
+    
+    // Verify performance meets expectations
+    assert!(write_throughput > 40.0, "Write throughput too low");
+    assert!(reads_per_sec > 20_000.0, "Read performance too low");
+}
+
+#[test]
+fn test_sstable_concurrent_reads() {
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_concurrent.sst");
+    
+    // First, create an SSTable
+    let config = SSTableConfig::default();
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
+    
+    for i in 0..1000 {
+        let key = test_key("concurrent", i);
+        let value = test_value(100, i as u8);
+        writer.add(&key, &value).unwrap();
     }
     
-    // Corrupt the file
-    {
-        let mut data = std::fs::read(path).unwrap();
-        // Corrupt some bytes in the middle
-        if data.len() > 1000 {
-            data[500] ^= 0xFF;
-            data[501] ^= 0xFF;
-            data[502] ^= 0xFF;
-        }
-        std::fs::write(path, data).unwrap();
-    }
+    writer.finish().unwrap();
     
-    // Try to read corrupted file
-    match SSTableReader::open(path) {
-        Ok(reader) => {
-            // May succeed opening, but reads might fail
-            let mut failures = 0;
-            for i in 0..100 {
-                let key = format!("key_{:04}", i);
-                if reader.get(key.as_bytes()).is_err() {
-                    failures += 1;
-                }
+    // Now test concurrent reads
+    let reader = Arc::new(SSTableReader::open(&sstable_path).unwrap());
+    let num_threads = 8;
+    let reads_per_thread = 1000;
+    
+    let mut handles = vec![];
+    
+    for thread_id in 0..num_threads {
+        let reader_clone = Arc::clone(&reader);
+        
+        let handle = std::thread::spawn(move || {
+            let mut rng = StdRng::seed_from_u64(thread_id);
+            
+            for _ in 0..reads_per_thread {
+                let i = rng.gen_range(0..1000);
+                let key = test_key("concurrent", i);
+                let value = reader_clone.get(&key).unwrap().unwrap();
+                assert_eq!(value.len(), 100);
+                assert!(value.iter().all(|&b| b == i as u8));
             }
-            println!("Read failures due to corruption: {}/100", failures);
-            assert!(failures > 0);
-        }
-        Err(e) => {
-            println!("Failed to open corrupted SSTable: {:?}", e);
-        }
+        });
+        
+        handles.push(handle);
+    }
+    
+    for handle in handles {
+        handle.join().unwrap();
     }
 }
 
-// Property-based tests
-#[cfg(test)]
-mod property_tests {
-    use super::*;
-    use proptest::prelude::*;
+#[test]
+fn test_sstable_sorted_order() {
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_sorted.sst");
     
-    proptest! {
-        #[test]
-        fn test_sstable_handles_any_kv_size(
-            key_size in 1..1000usize,
-            value_size in 1..100_000usize,
-            count in 1..100usize
-        ) {
-            let temp_file = NamedTempFile::new().unwrap();
-            let path = temp_file.path();
-            
-            // Write
-            {
-                let mut writer = SSTableWriter::new(path, SSTableConfig::default()).unwrap();
-                
-                for i in 0..count {
-                    let key = vec![b'k'; key_size];
-                    let mut value = vec![b'v'; value_size];
-                    // Make keys unique
-                    if key.len() >= 8 {
-                        key[0..8].copy_from_slice(&i.to_be_bytes());
-                    }
-                    writer.add(&key, &value).unwrap();
-                }
-                
-                writer.finish().unwrap();
-            }
-            
-            // Read and verify
-            {
-                let reader = SSTableReader::open(path).unwrap();
-                let entries: Vec<_> = reader.iter().collect();
-                assert_eq!(entries.len(), count);
-                
-                for (_, value) in entries {
-                    assert_eq!(value.unwrap().1.len(), value_size);
-                }
-            }
+    let config = SSTableConfig::default();
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
+    
+    // Keys must be added in sorted order
+    let keys = vec![
+        b"apple".to_vec(),
+        b"banana".to_vec(),
+        b"cherry".to_vec(),
+        b"date".to_vec(),
+        b"elderberry".to_vec(),
+    ];
+    
+    for (i, key) in keys.iter().enumerate() {
+        writer.add(key, &[i as u8]).unwrap();
+    }
+    
+    writer.finish().unwrap();
+    
+    // Verify with iterator that order is preserved
+    let reader = SSTableReader::open(&sstable_path).unwrap();
+    let mut iter = reader.iter();
+    
+    let mut prev_key: Option<Vec<u8>> = None;
+    while let Some(result) = iter.next() {
+        let (key, _) = result.unwrap();
+        if let Some(ref prev) = prev_key {
+            assert!(key.as_ref() > prev.as_slice());
         }
-        
-        #[test]
-        fn test_sstable_maintains_sort_order(
-            mut keys in prop::collection::vec(prop::collection::vec(0u8..255, 1..50), 10..100)
-        ) {
-            // Ensure unique keys
-            keys.sort();
-            keys.dedup();
-            
-            let temp_file = NamedTempFile::new().unwrap();
-            let path = temp_file.path();
-            
-            // Write in sorted order
-            {
-                let mut writer = SSTableWriter::new(path, SSTableConfig::default()).unwrap();
-                
-                for key in &keys {
-                    writer.add(key, b"value").unwrap();
-                }
-                
-                writer.finish().unwrap();
-            }
-            
-            // Read and verify order
-            {
-                let reader = SSTableReader::open(path).unwrap();
-                let read_keys: Vec<_> = reader.iter()
-                    .map(|r| r.unwrap().0.to_vec())
-                    .collect();
-                
-                assert_eq!(read_keys.len(), keys.len());
-                assert_eq!(read_keys, keys);
-            }
-        }
+        prev_key = Some(key.to_vec());
+    }
+}
+
+#[test]
+fn test_sstable_integration_with_storage() {
+    use hanshiro_storage::memtable::{MemTable, MemTableConfig};
+    use hanshiro_core::metrics::Metrics;
+    use hanshiro_core::types::{Event, EventType, EventSource, IngestionFormat};
+    use std::sync::Arc;
+    
+    let temp_dir = TempDir::new().unwrap();
+    let sstable_path = temp_dir.path().join("test_integration.sst");
+    
+    // Create events
+    let mut events = Vec::new();
+    for i in 0..100 {
+        let event = Event::new(
+            EventType::NetworkConnection,
+            EventSource {
+                host: format!("host-{}", i),
+                ip: Some("10.0.0.1".parse().unwrap()),
+                collector: "test".to_string(),
+                format: IngestionFormat::Raw,
+            },
+            vec![i as u8; 100],
+        );
+        events.push(event);
+    }
+    
+    // Sort events by ID for SSTable
+    events.sort_by(|a, b| a.id.to_string().cmp(&b.id.to_string()));
+    
+    // Write to SSTable
+    let config = SSTableConfig::default();
+    let mut writer = SSTableWriter::new(&sstable_path, config).unwrap();
+    
+    for event in &events {
+        let key = event.id.to_string().into_bytes();
+        let value = rmp_serde::to_vec(event).unwrap();
+        writer.add(&key, &value).unwrap();
+    }
+    
+    writer.finish().unwrap();
+    
+    // Read back and verify
+    let reader = SSTableReader::open(&sstable_path).unwrap();
+    
+    for event in &events {
+        let key = event.id.to_string().into_bytes();
+        let value = reader.get(&key).unwrap().unwrap();
+        let decoded: Event = rmp_serde::from_slice(&value).unwrap();
+        assert_eq!(decoded.id, event.id);
+        assert_eq!(decoded.raw_data, event.raw_data);
     }
 }

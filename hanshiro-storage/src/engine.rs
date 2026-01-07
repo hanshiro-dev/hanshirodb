@@ -140,8 +140,8 @@ impl StorageEngine {
                 path: entry.path.clone(),
                 file_size: entry.size,
                 entry_count: entry.entry_count,
-                min_key: bytes::Bytes::from(entry.min_key.clone()),
-                max_key: bytes::Bytes::from(entry.max_key.clone()),
+                min_key: entry.min_key.clone(),
+                max_key: entry.max_key.clone(),
                 creation_time: entry.creation_time,
                 level: entry.level,
             })
@@ -467,13 +467,17 @@ impl hanshiro_core::traits::StorageEngine for StorageEngine {
     async fn scan(&self, start: u64, end: u64) -> Result<Vec<Event>> {
         let mut all_events = Vec::new();
 
+        // Convert seconds to nanoseconds for MemTable scan
+        let start_ns = start.saturating_mul(1_000_000_000);
+        let end_ns = end.saturating_mul(1_000_000_000);
+
         // Scan MemTable
-        let memtable_events = self.memtable_manager.active.read().scan(start, end);
+        let memtable_events = self.memtable_manager.active.read().scan(start_ns, end_ns);
         all_events.extend(memtable_events);
 
         // Scan immutable MemTables
         for memtable in self.memtable_manager.immutable.read().iter() {
-            let events = memtable.scan(start, end);
+            let events = memtable.scan(start_ns, end_ns);
             all_events.extend(events);
         }
 
