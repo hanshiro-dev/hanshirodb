@@ -20,8 +20,17 @@ tokio = { workspace = true }
 # Index dependencies
 roaring = { workspace = true }
 dashmap = { workspace = true }
+parking_lot = "0.12"
+byteorder = "1.5"
+rand = "0.8"
+rayon = "1.10"
+uuid = "1.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }
+
+[[bench]]
+name = "simd_bench"
+harness = false
