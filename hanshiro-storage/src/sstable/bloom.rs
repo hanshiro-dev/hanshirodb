@@ -30,12 +30,12 @@ impl BloomFilter {
     /// Insert a key into the bloom filter
     #[inline]
     pub fn insert(&mut self, key: &[u8]) {
-        let h = gxhash::gxhash128(key, 0);
-        let h1 = h as u64;
-        let h2 = (h >> 64) as u64;
+        let h = gxhash::gxhash64(key, 0);
+        let h1 = h as usize;
+        let h2 = (h >> 32) as usize;
         
         for i in 0..self.num_hash_functions {
-            let bit_pos = (h1.wrapping_add((i as u64).wrapping_mul(h2)) as usize) % self.num_bits;
+            let bit_pos = h1.wrapping_add(i.wrapping_mul(h2)) % self.num_bits;
             self.bits[bit_pos / 8] |= 1 << (bit_pos % 8);
         }
     }
@@ -43,12 +43,12 @@ impl BloomFilter {
     /// Check if a key might be in the set (false positives possible)
     #[inline]
     pub fn contains(&self, key: &[u8]) -> bool {
-        let h = gxhash::gxhash128(key, 0);
-        let h1 = h as u64;
-        let h2 = (h >> 64) as u64;
+        let h = gxhash::gxhash64(key, 0);
+        let h1 = h as usize;
+        let h2 = (h >> 32) as usize;
         
         for i in 0..self.num_hash_functions {
-            let bit_pos = (h1.wrapping_add((i as u64).wrapping_mul(h2)) as usize) % self.num_bits;
+            let bit_pos = h1.wrapping_add(i.wrapping_mul(h2)) % self.num_bits;
             if (self.bits[bit_pos / 8] & (1 << (bit_pos % 8))) == 0 {
                 return false;
             }
