@@ -64,28 +64,23 @@ impl MerkleChain {
         self.sequence += 1;
     }
     
-    /// Compute hash for data with optional previous hash
-    pub fn compute_hash(&self, data: &[u8], prev_hash: Option<&str>) -> String {
-        // Hash the data
-        let data_hash = blake3::hash(data).to_hex().to_string();
-        
-        // Create chain hash
+    /// Fast chain hash when data_hash is pre-computed (avoids re-hashing data)
+    #[inline]
+    pub fn chain_hash_fast(&self, data_hash: &str, prev_hash: Option<&str>) -> String {
         let mut chain_hasher = Hasher::new();
-        
-        // Include previous hash if exists
         if let Some(prev) = prev_hash {
             chain_hasher.update(prev.as_bytes());
             chain_hasher.update(b"|");
         }
-        
-        // Include data hash
         chain_hasher.update(data_hash.as_bytes());
-        
-        // Include sequence number
         chain_hasher.update(&self.sequence.to_le_bytes());
-        
-        // Finalize hash
         hex::encode(chain_hasher.finalize().as_bytes())
+    }
+    
+    /// Compute hash for data with optional previous hash
+    pub fn compute_hash(&self, data: &[u8], prev_hash: Option<&str>) -> String {
+        let data_hash = blake3::hash(data).to_hex().to_string();
+        self.chain_hash_fast(&data_hash, prev_hash)
     }
     
     /// Add data to chain

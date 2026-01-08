@@ -415,6 +415,34 @@ impl PartitionManager {
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
     }
+
+    /// Pre-create partition directories for upcoming time windows.
+    /// Eliminates directory creation latency during writes.
+    pub fn pre_create_partitions(&self, count: usize) -> Result<usize> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let window_secs = self.window.duration_secs();
+        let mut created = 0;
+
+        for i in 0..count {
+            let future_ts = now_secs + (i as u64 * window_secs);
+            let partition = self.get_partition(future_ts);
+            let dir = self.partition_dir(&partition);
+            
+            if !dir.exists() {
+                std::fs::create_dir_all(&dir)?;
+                created += 1;
+            }
+        }
+
+        if created > 0 {
+            info!("Pre-created {} partition directories", created);
+        }
+        Ok(created)
+    }
 }
 
 /// Result of retention enforcement
@@ -476,5 +504,29 @@ mod tests {
         
         // Should cover: 01-15 window 2, 3, 01-16 window 0, 1, 2
         assert!(partitions.len() >= 5);
+    }
+
+    #[test]
+    fn test_pre_create_partitions() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let manager = PartitionManager::new(
+            temp_dir.path().to_path_buf(),
+            PartitionWindow::SixHour,
+            RetentionPolicy::default(),
+        );
+
+        let created = manager.pre_create_partitions(4).unwrap();
+        assert!(created > 0);
+
+        // Calling again should create 0 (already exist)
+        let created_again = manager.pre_create_partitions(4).unwrap();
+        assert_eq!(created_again, 0);
+
+        // Verify directories exist
+        let entries: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(!entries.is_empty());
     }
 }

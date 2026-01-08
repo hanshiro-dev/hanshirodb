@@ -74,12 +74,11 @@ impl Default for StorageConfig {
             compaction_config: CompactionConfig::default(),
             fd_config: FdConfig::default(),
             flush_interval: Duration::from_secs(60),
-            compaction_interval: Duration::from_secs(30), // More aggressive for SecOps
+            compaction_interval: Duration::from_secs(30), // More aggressive than usual for security logs
         }
     }
 }
 
-/// Main storage engine implementation
 pub struct StorageEngine {
     config: StorageConfig,
     wal: Arc<WriteAheadLog>,
@@ -95,20 +94,25 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
-    /// Create or recover storage engine
     pub async fn new(config: StorageConfig) -> Result<Self> {
-        // Create directories
+        // Initialize cached timestamp early
+        crate::cached_time::init();
+        
         tokio::fs::create_dir_all(&config.data_dir).await?;
         let wal_dir = config.data_dir.join("wal");
         let sstable_dir = config.data_dir.join("sstables");
         tokio::fs::create_dir_all(&wal_dir).await?;
         tokio::fs::create_dir_all(&sstable_dir).await?;
 
-        // Load or create manifest
+        // Pre-create level directories to avoid mkdir latency during flushes
+        for level in 0..config.compaction_config.max_levels {
+            let level_dir = sstable_dir.join(format!("L{}", level));
+            tokio::fs::create_dir_all(&level_dir).await?;
+        }
+
         let manifest = Manifest::load_or_create(&config.data_dir)?;
         let wal_checkpoint = manifest.wal_checkpoint;
         
-        // Compute next SSTable ID
         let next_sstable_id = manifest
             .sstables
             .iter()
@@ -123,17 +127,14 @@ impl StorageEngine {
             manifest.sstables.len()
         );
 
-        // Initialize WAL (recovers sequence numbers and Merkle chain)
         let wal = Arc::new(WriteAheadLog::new(&wal_dir, config.wal_config.clone()).await?);
 
-        // Initialize MemTable
         let metrics = Arc::new(Metrics::new());
         let memtable_manager = Arc::new(MemTableManager::new(
             config.memtable_config.clone(),
             metrics.clone(),
         ));
 
-        // Load SSTable metadata from manifest
         let sstables: Vec<SSTableInfo> = manifest
             .sstables
             .iter()
@@ -148,7 +149,7 @@ impl StorageEngine {
             })
             .collect();
 
-        // === CRASH RECOVERY: Replay WAL entries not yet flushed to SSTable ===
+        // CRASH RECOVERY: Replay WAL entries not yet flushed to SSTable
         let replayed = Self::replay_wal(&wal, &memtable_manager, wal_checkpoint).await?;
         if replayed > 0 {
             info!(
@@ -161,11 +162,9 @@ impl StorageEngine {
 
         let next_sstable_id = Arc::new(std::sync::atomic::AtomicU64::new(next_sstable_id));
 
-        // Initialize FD management
         let sstable_pool = Arc::new(SSTablePool::new(config.fd_config.clone()));
         let fd_monitor = Arc::new(FdMonitor::new(config.fd_config.soft_limit_ratio));
 
-        // Initialize compactor
         let compactor = Arc::new(Compactor::new(
             config.compaction_config.clone(),
             config.sstable_config.clone(),

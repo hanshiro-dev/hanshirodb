@@ -291,10 +291,7 @@ impl WriteAheadLog {
 
     fn create_entry(&self, event: &Event) -> Result<WalEntry> {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let timestamp = crate::cached_time::now_ms();
 
         let data = rmp_serde::to_vec(event).map_err(|e| Error::WriteAheadLog {
             message: "Serialization failed".to_string(),
@@ -312,18 +309,15 @@ impl WriteAheadLog {
         })
     }
 
-    /// Create entries in parallel for better performance with large batches
+    /// Create entries in parallel for better performance with large batches.
+    /// Uses pipelined hashing: data hashes computed in parallel, chain hashes overlap with I/O.
     fn create_entries_batch(&self, events: &[Event]) -> Result<Vec<WalEntry>> {
         use rayon::prelude::*;
         
-        // First, serialize all events and reserve sequences
         let start_sequence = self.sequence.fetch_add(events.len() as u64, Ordering::SeqCst);
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let timestamp = crate::cached_time::now_ms();
         
-        // Parallel serialization and hashing
+        // Phase 1: Parallel serialization + data hashing (CPU-bound, parallelizable)
         let serialized: Vec<(u64, Vec<u8>, String)> = events
             .par_iter()
             .enumerate()
@@ -333,39 +327,34 @@ impl WriteAheadLog {
                     message: "Serialization failed".to_string(),
                     source: Some(Box::new(e)),
                 })?;
-                
-                // Compute data hash in parallel
                 let data_hash = blake3::hash(&data).to_hex().to_string();
-                
                 Ok((sequence, data, data_hash))
             })
             .collect::<Result<Vec<_>>>()?;
         
-        // Update Merkle chain sequentially (required for chain integrity)
+        // Phase 2: Sequential chain hash (must be serial, but fast - just hash concatenation)
         let mut merkle_chain = self.merkle_chain.write();
-        let mut entries = Vec::with_capacity(events.len());
-        
-        for (sequence, data, data_hash) in serialized {
-            let prev_hash = merkle_chain.get_last_hash();
-            let hash = merkle_chain.compute_hash(&data, prev_hash.as_deref());
-            
-            let merkle = MerkleNode {
-                hash: hash.clone(),
-                prev_hash: prev_hash,
-                data_hash,
-                sequence,
-            };
-            
-            merkle_chain.set_last_hash(hash);
-            
-            entries.push(WalEntry {
-                sequence,
-                timestamp,
-                entry_type: EntryType::Data,
-                data: Bytes::from(data),
-                merkle,
-            });
-        }
+        let entries: Vec<WalEntry> = serialized
+            .into_iter()
+            .map(|(sequence, data, data_hash)| {
+                let prev_hash = merkle_chain.get_last_hash();
+                let hash = merkle_chain.chain_hash_fast(&data_hash, prev_hash.as_deref());
+                merkle_chain.set_last_hash(hash.clone());
+                
+                WalEntry {
+                    sequence,
+                    timestamp,
+                    entry_type: EntryType::Data,
+                    data: Bytes::from(data),
+                    merkle: MerkleNode {
+                        hash,
+                        prev_hash,
+                        data_hash,
+                        sequence,
+                    },
+                }
+            })
+            .collect();
         
         Ok(entries)
     }
