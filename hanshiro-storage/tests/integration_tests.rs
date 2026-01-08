@@ -27,7 +27,7 @@ fn create_security_event(id: u64, event_type: EventType) -> Event {
         event_type.clone(),
         EventSource {
             host: format!("server-{}", id % 10),
-            ip: Some(format!("10.0.{}.{}", id % 256, (id / 256) % 256).parse().unwrap()),
+            ip: Some(format!("10.0.{}.{}", id % 256, (id / 256) % 256)),
             collector: "syslog".to_string(),
             format: IngestionFormat::OCSF,
         },
@@ -35,21 +35,21 @@ fn create_security_event(id: u64, event_type: EventType) -> Event {
     );
     
     // Add realistic metadata
-    event.add_metadata("severity", match id % 5 {
+    event.add_metadata("severity", serde_json::json!(match id % 5 {
         0 => "critical",
         1 => "high",
         2 => "medium",
         3 => "low",
         _ => "info",
-    });
-    event.add_metadata("user", format!("user{}", id % 100));
-    event.add_metadata("process", format!("process_{}", id % 50));
-    event.add_metadata("action", match event_type {
+    }));
+    event.add_metadata("user", serde_json::json!(format!("user{}", id % 100)));
+    event.add_metadata("process", serde_json::json!(format!("process_{}", id % 50)));
+    event.add_metadata("action", serde_json::json!(match event_type {
         EventType::Authentication => "login",
         EventType::NetworkConnection => "connect",
         EventType::FileModify => "write",
         _ => "unknown",
-    });
+    }));
     
     event
 }
@@ -478,7 +478,7 @@ async fn test_storage_with_vector_data() {
     for (i, event) in events.iter().enumerate() {
         assert!(event.vector.is_some());
         let vector = event.vector.as_ref().unwrap();
-        assert_eq!(vector.dimension.value(), 768);
+        assert_eq!(vector.dimension, 768);
         assert!(vector.normalized);
     }
 }

@@ -293,9 +293,9 @@ impl WriteAheadLog {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let timestamp = crate::cached_time::now_ms();
 
-        let data = rmp_serde::to_vec(event).map_err(|e| Error::WriteAheadLog {
-            message: "Serialization failed".to_string(),
-            source: Some(Box::new(e)),
+        let data = hanshiro_core::serialize_event(event).map_err(|e| Error::WriteAheadLog {
+            message: format!("Serialization failed: {}", e),
+            source: None,
         })?;
 
         let merkle = self.merkle_chain.write().add(&data);
@@ -323,9 +323,9 @@ impl WriteAheadLog {
             .enumerate()
             .map(|(i, event)| {
                 let sequence = start_sequence + i as u64;
-                let data = rmp_serde::to_vec(event).map_err(|e| Error::WriteAheadLog {
-                    message: "Serialization failed".to_string(),
-                    source: Some(Box::new(e)),
+                let data = hanshiro_core::serialize_event(event).map_err(|e| Error::WriteAheadLog {
+                    message: format!("Serialization failed: {}", e),
+                    source: None,
                 })?;
                 let data_hash = blake3::hash(&data).to_hex().to_string();
                 Ok((sequence, data, data_hash))

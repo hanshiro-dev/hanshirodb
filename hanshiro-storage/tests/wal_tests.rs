@@ -25,15 +25,14 @@ fn create_test_event(id: u64, data_size: usize) -> Event {
         EventType::NetworkConnection,
         EventSource {
             host: format!("test-host-{}", id),
-            ip: Some("192.168.1.1".parse().unwrap()),
+            ip: Some("192.168.1.1".to_string()),
             collector: "test-collector".to_string(),
             format: IngestionFormat::Raw,
         },
         vec![b'x'; data_size],
     );
-    // MessagePack supports serde_json::Value
-    event.add_metadata("test_id", id);
-    event.add_metadata("severity", "high");
+    event.add_metadata("test_id", serde_json::json!(id));
+    event.add_metadata("severity", serde_json::json!("high"));
     event
 }
 
@@ -55,8 +54,9 @@ async fn test_wal_basic_write_read() {
     assert_eq!(entries[0].sequence, 0);
     
     // Verify data integrity
-    let recovered_event: Event = rmp_serde::from_slice(&entries[0].data).unwrap();
-    assert_eq!(recovered_event.id, event.id);
+    let recovered_event: Event = hanshiro_core::deserialize_event(&entries[0].data).unwrap();
+    assert_eq!(recovered_event.id.hi, event.id.hi);
+    assert_eq!(recovered_event.id.lo, event.id.lo);
 }
 
 #[tokio::test]
@@ -396,7 +396,7 @@ async fn test_wal_file_rotation() {
     
     // Verify each entry can be deserialized
     for entry in &entries {
-        let event: Event = rmp_serde::from_slice(&entry.data)
+        let event: Event = hanshiro_core::deserialize_event(&entry.data)
             .expect("Failed to deserialize event after rotation");
         assert_eq!(event.raw_data.len(), 1024);
     }
@@ -667,7 +667,7 @@ async fn test_wal_large_events() {
     assert_eq!(entries.len(), sizes.len());
     
     for (i, entry) in entries.iter().enumerate() {
-        let event: Event = rmp_serde::from_slice(&entry.data).unwrap();
+        let event: Event = hanshiro_core::deserialize_event(&entry.data).unwrap();
         assert_eq!(event.raw_data.len(), sizes[i]);
     }
 }
@@ -998,7 +998,7 @@ async fn test_wal_batch_with_varying_event_sizes() {
     assert_eq!(entries.len(), sizes.len());
     
     for (i, entry) in entries.iter().enumerate() {
-        let event: Event = rmp_serde::from_slice(&entry.data).unwrap();
+        let event: Event = hanshiro_core::deserialize_event(&entry.data).unwrap();
         assert_eq!(event.raw_data.len(), sizes[i], 
             "Event {} has wrong size: expected {}, got {}", i, sizes[i], event.raw_data.len());
     }
@@ -1100,7 +1100,7 @@ mod property_tests {
                 let entries = wal.read_from(0).await.unwrap();
                 assert_eq!(entries.len(), 1);
                 
-                let recovered: Event = rmp_serde::from_slice(&entries[0].data).unwrap();
+                let recovered: Event = hanshiro_core::deserialize_event(&entries[0].data).unwrap();
                 assert_eq!(recovered.raw_data.len(), size);
             });
         }

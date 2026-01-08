@@ -77,7 +77,7 @@ async fn test_achieve_200k_events_per_sec() {
         EventType::NetworkConnection,
         EventSource {
             host: "perf-test".to_string(),
-            ip: Some("10.0.0.1".parse().unwrap()),
+            ip: Some("10.0.0.1".to_string()),
             collector: "optimized".to_string(),
             format: IngestionFormat::Raw,
         },
@@ -265,7 +265,7 @@ async fn test_sharding_for_extreme_performance() {
                         EventType::NetworkConnection,
                         EventSource {
                             host: format!("shard-{}", shard_id),
-                            ip: Some("10.0.0.1".parse().unwrap()),
+                            ip: Some("10.0.0.1".to_string()),
                             collector: "sharded".to_string(),
                             format: IngestionFormat::Raw,
                         },

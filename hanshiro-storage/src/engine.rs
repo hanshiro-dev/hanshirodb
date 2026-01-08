@@ -186,19 +186,16 @@ impl StorageEngine {
             compactor,
         };
 
-        // Start background tasks
         engine.start_background_tasks();
 
         Ok(engine)
     }
 
-    /// Replay WAL entries after checkpoint into MemTable
     async fn replay_wal(
         wal: &WriteAheadLog,
         memtable_manager: &MemTableManager,
         checkpoint: u64,
     ) -> Result<usize> {
-        // Read all WAL entries after the checkpoint
         let entries = wal.read_from(checkpoint).await?;
         
         let mut replayed = 0;
@@ -209,7 +206,7 @@ impl StorageEngine {
             }
 
             // Deserialize and insert into MemTable
-            match rmp_serde::from_slice::<Event>(&entry.data) {
+            match hanshiro_core::deserialize_event(&entry.data) {
                 Ok(event) => {
                     if let Err(e) = memtable_manager.insert(event) {
                         warn!("Failed to replay WAL entry {}: {:?}", entry.sequence, e);
@@ -338,7 +335,7 @@ impl StorageEngine {
             for (key, entry) in &entries {
                 let key_bytes = rmp_serde::to_vec(&key)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
-                let value_bytes = rmp_serde::to_vec(&entry.event)
+                let value_bytes = hanshiro_core::serialize_event(&entry.event)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
                 writer.add(&key_bytes, &value_bytes)?;
 
@@ -524,7 +521,7 @@ impl hanshiro_core::traits::StorageEngine for StorageEngine {
                 .map_err(|e| Error::Internal { message: e.to_string() })?;
 
             if let Some(value) = reader.get(&key)? {
-                let event: Event = rmp_serde::from_slice(&value)
+                let event: Event = hanshiro_core::deserialize_event(&value)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
                 return Ok(Some(event));
             }
@@ -573,17 +570,16 @@ impl hanshiro_core::traits::StorageEngine for StorageEngine {
 
             for result in reader.iter() {
                 let (_, value) = result?;
-                let event: Event = rmp_serde::from_slice(&value)
+                let event: Event = hanshiro_core::deserialize_event(&value)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
 
-                let event_ts = event.timestamp.timestamp() as u64;
-                if event_ts >= start && event_ts <= end {
+                if event.timestamp_ms >= start && event.timestamp_ms <= end {
                     all_events.push(event);
                 }
             }
         }
 
-        all_events.sort_by_key(|e| e.timestamp);
+        all_events.sort_by_key(|e| e.timestamp_ms);
 
         Ok(all_events)
     }

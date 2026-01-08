@@ -37,6 +37,7 @@ crc32fast = { workspace = true }
 blake3 = { workspace = true }
 hex = "0.4"
 rmp-serde = "1.1"
+rkyv = { version = "0.7", features = ["validation", "strict"] }
 chrono = { version = "0.4", features = ["serde"] }
 rayon = "1.10"
 crossbeam-channel = "0.5"
@@ -44,6 +45,7 @@ crossbeam-utils = "0.8"
 libc = "0.2"
 lru = "0.12"
 num_cpus = "1.16"
+gxhash = "3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

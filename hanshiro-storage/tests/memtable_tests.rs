@@ -27,17 +27,17 @@ fn create_test_event(id: u64, size: usize) -> Event {
         EventType::NetworkConnection,
         EventSource {
             host: format!("test-host-{}", id),
-            ip: Some("10.0.0.1".parse().unwrap()),
+            ip: Some("10.0.0.1".to_string()),
             collector: "test-collector".to_string(),
             format: IngestionFormat::Raw,
         },
         vec![b'x'; size],
     );
-    event.add_metadata("test_id", id);
-    event.add_metadata("timestamp", std::time::SystemTime::now()
+    event.add_metadata("test_id", serde_json::json!(id));
+    event.add_metadata("timestamp", serde_json::json!(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u64);
+        .as_millis() as u64));
     event
 }
 
@@ -97,8 +97,8 @@ fn test_memtable_scan_operations() {
     
     // Verify ordering
     for i in 1..all_events.len() {
-        let prev_meta = all_events[i-1].metadata.get("test_id").unwrap().as_u64().unwrap();
-        let curr_meta = all_events[i].metadata.get("test_id").unwrap().as_u64().unwrap();
+        let prev_meta = all_events[i-1].metadata().get("test_id").unwrap().as_u64().unwrap();
+        let curr_meta = all_events[i].metadata().get("test_id").unwrap().as_u64().unwrap();
         assert!(prev_meta < curr_meta);
     }
 }
@@ -462,9 +462,9 @@ fn test_memtable_metadata_handling() {
     
     // Create event with complex metadata
     let mut event = create_test_event(1, 256);
-    event.add_metadata("field1", "value1");
-    event.add_metadata("field2", 42i64);
-    event.add_metadata("field3", true);
+    event.add_metadata("field1", serde_json::json!("value1"));
+    event.add_metadata("field2", serde_json::json!(42i64));
+    event.add_metadata("field3", serde_json::json!(true));
     event.add_metadata("nested", serde_json::json!({
         "key1": "value1",
         "key2": [1, 2, 3]
@@ -475,8 +475,8 @@ fn test_memtable_metadata_handling() {
     
     // Retrieve and verify metadata
     let retrieved = memtable.get(&event_id).unwrap();
-    assert_eq!(retrieved.metadata.get("field1").unwrap(), "value1");
-    assert_eq!(retrieved.metadata.get("field2").unwrap(), 42);
-    assert_eq!(retrieved.metadata.get("field3").unwrap(), true);
-    assert!(retrieved.metadata.get("nested").is_some());
+    assert_eq!(retrieved.metadata().get("field1").unwrap(), "value1");
+    assert_eq!(retrieved.metadata().get("field2").unwrap(), 42);
+    assert_eq!(retrieved.metadata().get("field3").unwrap(), true);
+    assert!(retrieved.metadata().get("nested").is_some());
 }

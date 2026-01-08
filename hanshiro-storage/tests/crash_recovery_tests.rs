@@ -19,7 +19,7 @@ fn create_test_event(id: u64, data_size: usize) -> Event {
         EventType::NetworkConnection,
         EventSource {
             host: format!("host-{}", id),
-            ip: Some("192.168.1.1".parse().unwrap()),
+            ip: Some("192.168.1.1".to_string()),
             collector: "test".to_string(),
             format: IngestionFormat::Raw,
         },

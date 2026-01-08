@@ -192,8 +192,8 @@ impl MemTable {
         // Add event data size
         size += event.raw_data.len();
         
-        // Add metadata size (approximate)
-        size += event.metadata.len() * 64; // Rough estimate per metadata entry
+        // Add metadata size (approximate - JSON string length)
+        size += event.metadata_json.len();
         
         // Add vector size if present
         if let Some(ref vector) = event.vector {

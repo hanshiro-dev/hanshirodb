@@ -442,7 +442,7 @@ fn test_sstable_integration_with_storage() {
             EventType::NetworkConnection,
             EventSource {
                 host: format!("host-{}", i),
-                ip: Some("10.0.0.1".parse().unwrap()),
+                ip: Some("10.0.0.1".to_string()),
                 collector: "test".to_string(),
                 format: IngestionFormat::Raw,
             },
@@ -460,7 +460,7 @@ fn test_sstable_integration_with_storage() {
     
     for event in &events {
         let key = event.id.to_string().into_bytes();
-        let value = rmp_serde::to_vec(event).unwrap();
+        let value = hanshiro_core::serialize_event(event).unwrap();
         writer.add(&key, &value).unwrap();
     }
     
@@ -472,7 +472,7 @@ fn test_sstable_integration_with_storage() {
     for event in &events {
         let key = event.id.to_string().into_bytes();
         let value = reader.get(&key).unwrap().unwrap();
-        let decoded: Event = rmp_serde::from_slice(&value).unwrap();
+        let decoded: Event = hanshiro_core::deserialize_event(&value).unwrap();
         assert_eq!(decoded.id, event.id);
         assert_eq!(decoded.raw_data, event.raw_data);
     }

@@ -50,16 +50,16 @@ struct SoakMetrics {
 fn create_test_event(seq: u64) -> Event {
     Event {
         id: EventId::new(),
-        timestamp: chrono::Utc::now(),
+        timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
         event_type: EventType::NetworkConnection,
         source: EventSource {
             host: "soak-test".to_string(),
-            ip: Some("10.0.0.1".parse().unwrap()),
+            ip: Some("10.0.0.1".to_string()),
             collector: "test".to_string(),
             format: IngestionFormat::Raw,
         },
         raw_data: format!("soak_test_event_{}", seq).into_bytes(),
-        metadata: Default::default(),
+        metadata_json: "{}".to_string(),
         vector: None,
         merkle_prev: None,
         merkle_hash: None,

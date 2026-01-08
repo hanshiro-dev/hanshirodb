@@ -17,23 +17,21 @@ bytes = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 
+# Serialization
+rkyv = { version = "0.7", features = ["validation", "strict"] }
+bytecheck = "0.6"
+
 # Cryptography
 blake3 = { workspace = true }
 crc32fast = { workspace = true }
 ring = "0.17"
+hex = "0.4"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
 # UUID generation
 uuid = { version = "1.10", features = ["v4", "serde"] }
-
-# Compression
-lz4 = "1.24"
-zstd = "0.13"
-
-# Additional dependencies
-hex = "0.4"
 
 [dev-dependencies]
 proptest = { workspace = true }

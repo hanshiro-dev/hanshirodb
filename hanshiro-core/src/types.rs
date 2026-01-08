@@ -4,87 +4,102 @@
 //!
 //! ## Type Design Philosophy
 //!
-//! 1. **Zero-Copy**: Use references where possible
+//! 1. **Zero-Copy**: Use rkyv for zero-copy deserialization
 //! 2. **Type Safety**: Strong typing prevents runtime errors
-//! 3. **Serialization**: All types support efficient serialization
+//! 3. **Serialization**: All types support efficient rkyv serialization
 //! 4. **Validation**: Types validate their invariants
 
-use chrono::{DateTime, Utc};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use uuid::Uuid;
 
-/// Timestamp type used throughout the system
-pub type Timestamp = DateTime<Utc>;
-
-/// Unique identifier for events
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct EventId(pub Uuid);
+/// Unique identifier for events (128-bit UUID stored as two u64s for rkyv)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug))]
+pub struct EventId {
+    pub hi: u64,
+    pub lo: u64,
+}
 
 impl EventId {
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        let uuid = uuid::Uuid::new_v4();
+        let (hi, lo) = uuid.as_u64_pair();
+        Self { hi, lo }
+    }
+    
+    pub fn to_uuid(&self) -> uuid::Uuid {
+        uuid::Uuid::from_u64_pair(self.hi, self.lo)
+    }
+}
+
+impl Default for EventId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl fmt::Display for EventId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.to_uuid())
     }
 }
 
 /// Unique identifier for vectors
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct VectorId(pub Uuid);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug))]
+pub struct VectorId {
+    pub hi: u64,
+    pub lo: u64,
+}
 
 impl VectorId {
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        let uuid = uuid::Uuid::new_v4();
+        let (hi, lo) = uuid.as_u64_pair();
+        Self { hi, lo }
     }
 }
 
-/// Vector dimension (must be positive)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VectorDimension(u16);
-
-impl VectorDimension {
-    pub fn new(dim: u16) -> Result<Self, &'static str> {
-        if dim == 0 {
-            Err("Vector dimension must be positive")
-        } else if dim > 4096 {
-            Err("Vector dimension too large (max 4096)")
-        } else {
-            Ok(Self(dim))
-        }
-    }
-    
-    pub fn value(&self) -> u16 {
-        self.0
+impl Default for VectorId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 /// Vector data structure
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug))]
 pub struct Vector {
     pub id: VectorId,
     pub data: Vec<f32>,
-    pub dimension: VectorDimension,
+    pub dimension: u16,
     pub normalized: bool,
 }
 
 impl Vector {
     pub fn new(data: Vec<f32>) -> Result<Self, &'static str> {
-        let dimension = VectorDimension::new(data.len() as u16)?;
+        if data.is_empty() {
+            return Err("Vector dimension must be positive");
+        }
+        if data.len() > 4096 {
+            return Err("Vector dimension too large (max 4096)");
+        }
         Ok(Self {
             id: VectorId::new(),
+            dimension: data.len() as u16,
             data,
-            dimension,
             normalized: false,
         })
     }
     
-    /// L2 normalize the vector
     pub fn normalize(&mut self) {
         let norm: f32 = self.data.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm > 0.0 {
@@ -92,74 +107,76 @@ impl Vector {
             self.normalized = true;
         }
     }
-    
-    /// Compute cosine similarity with another vector
-    pub fn cosine_similarity(&self, other: &Vector) -> Result<f32, &'static str> {
-        if self.dimension != other.dimension {
-            return Err("Vector dimensions must match");
-        }
-        
-        let dot_product: f32 = self.data.iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a * b)
-            .sum();
-            
-        if self.normalized && other.normalized {
-            Ok(dot_product)
-        } else {
-            let norm_a: f32 = self.data.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let norm_b: f32 = other.data.iter().map(|x| x * x).sum::<f32>().sqrt();
-            Ok(dot_product / (norm_a * norm_b))
-        }
-    }
 }
 
 /// Event type enumeration
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug))]
 pub enum EventType {
-    // Network Events
     NetworkConnection,
     NetworkTraffic,
     DNSQuery,
     HTTPRequest,
-    
-    // Authentication Events
     Authentication,
     Authorization,
     PasswordChange,
-    
-    // File Events
     FileCreate,
     FileModify,
     FileDelete,
     FileAccess,
-    
-    // Process Events
     ProcessStart,
     ProcessStop,
     ProcessInject,
-    
-    // Threat Events
     MalwareDetected,
     AnomalyDetected,
     PolicyViolation,
-    
-    // Custom
     Custom(String),
 }
 
-/// Event metadata as flexible key-value pairs
-pub type EventMetadata = HashMap<String, serde_json::Value>;
+/// Supported ingestion formats
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug))]
+pub enum IngestionFormat {
+    OCSF,
+    STIX,
+    TAXII,
+    Zeek,
+    Suricata,
+    PEHeader,
+    CEF,
+    LEEF,
+    Raw,
+    Custom(String),
+}
 
-/// Core event structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Event source information
+#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug))]
+pub struct EventSource {
+    pub host: String,
+    pub ip: Option<String>,  // IP as string for rkyv compatibility
+    pub collector: String,
+    pub format: IngestionFormat,
+}
+
+/// Core event structure - optimized for rkyv zero-copy serialization
+#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Archive, RkyvDeserialize, RkyvSerialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug))]
 pub struct Event {
     pub id: EventId,
-    pub timestamp: Timestamp,
+    pub timestamp_ms: u64,  // Milliseconds since epoch (faster than DateTime)
     pub event_type: EventType,
     pub source: EventSource,
     pub raw_data: Vec<u8>,
-    pub metadata: EventMetadata,
+    pub metadata_json: String,  // JSON string for flexible metadata
     pub vector: Option<Vector>,
     pub merkle_prev: Option<String>,
     pub merkle_hash: Option<String>,
@@ -169,54 +186,38 @@ impl Event {
     pub fn new(event_type: EventType, source: EventSource, raw_data: Vec<u8>) -> Self {
         Self {
             id: EventId::new(),
-            timestamp: Utc::now(),
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
             event_type,
             source,
             raw_data,
-            metadata: HashMap::new(),
+            metadata_json: "{}".to_string(),
             vector: None,
             merkle_prev: None,
             merkle_hash: None,
         }
     }
     
-    /// Add metadata field
-    pub fn add_metadata<K, V>(&mut self, key: K, value: V) 
-    where
-        K: Into<String>,
-        V: Into<serde_json::Value>,
-    {
-        self.metadata.insert(key.into(), value.into());
+    /// Add metadata field (merges into JSON)
+    pub fn add_metadata<K: AsRef<str>>(&mut self, key: K, value: serde_json::Value) {
+        let mut map: HashMap<String, serde_json::Value> = 
+            serde_json::from_str(&self.metadata_json).unwrap_or_default();
+        map.insert(key.as_ref().to_string(), value);
+        self.metadata_json = serde_json::to_string(&map).unwrap_or_default();
     }
     
-    /// Get metadata field
-    pub fn get_metadata(&self, key: &str) -> Option<&serde_json::Value> {
-        self.metadata.get(key)
+    /// Get metadata as HashMap
+    pub fn metadata(&self) -> HashMap<String, serde_json::Value> {
+        serde_json::from_str(&self.metadata_json).unwrap_or_default()
     }
-}
-
-/// Event source information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventSource {
-    pub host: String,
-    pub ip: Option<std::net::IpAddr>,
-    pub collector: String,
-    pub format: IngestionFormat,
-}
-
-/// Supported ingestion formats
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IngestionFormat {
-    OCSF,       // Open Cybersecurity Schema Framework
-    STIX,       // Structured Threat Information Expression
-    TAXII,      // Trusted Automated Exchange of Intelligence Information
-    Zeek,       // Zeek (formerly Bro) logs
-    Suricata,   // Suricata IDS logs
-    PEHeader,   // Windows PE executable headers
-    CEF,        // Common Event Format
-    LEEF,       // Log Event Extended Format
-    Raw,        // Raw unstructured logs
-    Custom(String),
+    
+    /// Get timestamp as chrono DateTime
+    pub fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp_millis(self.timestamp_ms as i64)
+            .unwrap_or_default()
+    }
 }
 
 /// Query request structure
@@ -267,23 +268,23 @@ pub enum FilterOperator {
     EndsWith,
 }
 
-/// Time range for queries
+/// Time range for queries (milliseconds since epoch)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeRange {
-    pub start: Timestamp,
-    pub end: Timestamp,
+    pub start_ms: u64,
+    pub end_ms: u64,
 }
 
 impl TimeRange {
-    pub fn new(start: Timestamp, end: Timestamp) -> Result<Self, &'static str> {
-        if start > end {
+    pub fn new(start_ms: u64, end_ms: u64) -> Result<Self, &'static str> {
+        if start_ms > end_ms {
             Err("Start time must be before end time")
         } else {
-            Ok(Self { start, end })
+            Ok(Self { start_ms, end_ms })
         }
     }
     
-    pub fn contains(&self, timestamp: &Timestamp) -> bool {
-        timestamp >= &self.start && timestamp <= &self.end
+    pub fn contains(&self, timestamp_ms: u64) -> bool {
+        timestamp_ms >= self.start_ms && timestamp_ms <= self.end_ms
     }
 }

@@ -50,7 +50,7 @@ async fn test_full_stack_performance() {
             EventType::NetworkConnection,
             EventSource {
                 host: format!("host-{}", i % 10),
-                ip: Some("10.0.0.1".parse().unwrap()),
+                ip: Some("10.0.0.1".to_string()),
                 collector: "test".to_string(),
                 format: IngestionFormat::Raw,
             },
@@ -178,7 +178,7 @@ async fn test_component_performance_breakdown() {
             EventType::NetworkConnection,
             EventSource {
                 host: format!("host-{}", i),
-                ip: Some("10.0.0.1".parse().unwrap()),
+                ip: Some("10.0.0.1".to_string()),
                 collector: "test".to_string(),
                 format: IngestionFormat::Raw,
             },
@@ -224,7 +224,7 @@ async fn test_component_performance_breakdown() {
     let start = Instant::now();
     for (i, event) in events.iter().enumerate() {
         let key = format!("{:08}", i).into_bytes();
-        let value = rmp_serde::to_vec(event).unwrap();
+        let value = hanshiro_core::serialize_event(event).unwrap();
         writer.add(&key, &value).unwrap();
     }
     writer.finish().unwrap();
