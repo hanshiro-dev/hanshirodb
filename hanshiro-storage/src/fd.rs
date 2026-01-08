@@ -2,11 +2,12 @@
 //!
 //! Manages file descriptors to prevent exhaustion under sustained load.
 //! Provides:
-//! - LRU pool for SSTable readers
+//! - Partitioned LRU pool for SSTable readers (reduces lock contention)
 //! - FD usage monitoring
 //! - Backpressure when approaching limits
 
-use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -14,7 +15,7 @@ use std::sync::Arc;
 
 use lru::LruCache;
 use parking_lot::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use hanshiro_core::error::{Error, Result};
 use crate::sstable::SSTableReader;
@@ -28,6 +29,8 @@ pub struct FdConfig {
     pub soft_limit_ratio: f64,
     /// Enable backpressure when approaching limit
     pub enable_backpressure: bool,
+    /// Number of partitions (0 = auto: 2 per CPU core)
+    pub partitions: usize,
 }
 
 impl Default for FdConfig {
@@ -36,6 +39,7 @@ impl Default for FdConfig {
             max_open_sstables: 256,
             soft_limit_ratio: 0.8,
             enable_backpressure: true,
+            partitions: 0, // auto
         }
     }
 }
@@ -49,120 +53,149 @@ pub struct FdStats {
     pub evictions: u64,
     pub system_limit: u64,
     pub estimated_used: u64,
+    pub partitions: usize,
 }
 
-/// LRU pool for SSTable readers
-pub struct SSTablePool {
-    config: FdConfig,
+/// Single partition of the SSTable pool
+struct PoolPartition {
     cache: Mutex<LruCache<PathBuf, Arc<SSTableReader>>>,
-    stats: FdPoolStats,
-    system_fd_limit: u64,
-}
-
-struct FdPoolStats {
     hits: AtomicU64,
     misses: AtomicU64,
     evictions: AtomicU64,
+}
+
+/// Partitioned LRU pool for SSTable readers - reduces lock contention
+pub struct SSTablePool {
+    config: FdConfig,
+    partitions: Vec<PoolPartition>,
     current_open: AtomicUsize,
+    system_fd_limit: u64,
 }
 
 impl SSTablePool {
     pub fn new(config: FdConfig) -> Self {
         let system_fd_limit = get_fd_limit();
         let max_size = config.max_open_sstables.min(
-            ((system_fd_limit as f64 * config.soft_limit_ratio) as usize).saturating_sub(64) // Reserve 64 for WAL, etc.
+            ((system_fd_limit as f64 * config.soft_limit_ratio) as usize).saturating_sub(64)
         );
 
+        // 2 partitions per core, min 4, max 64
+        let num_partitions = if config.partitions > 0 {
+            config.partitions
+        } else {
+            (num_cpus::get() * 2).clamp(4, 64)
+        };
+        
+        let per_partition = (max_size / num_partitions).max(1);
+        
+        let partitions: Vec<_> = (0..num_partitions)
+            .map(|_| PoolPartition {
+                cache: Mutex::new(LruCache::new(NonZeroUsize::new(per_partition).unwrap())),
+                hits: AtomicU64::new(0),
+                misses: AtomicU64::new(0),
+                evictions: AtomicU64::new(0),
+            })
+            .collect();
+
         info!(
-            "SSTable pool initialized: max={}, system_limit={}",
-            max_size, system_fd_limit
+            "SSTable pool: {} partitions, {} per partition, system_limit={}",
+            num_partitions, per_partition, system_fd_limit
         );
 
         Self {
             config,
-            cache: Mutex::new(LruCache::new(NonZeroUsize::new(max_size.max(1)).unwrap())),
-            stats: FdPoolStats {
-                hits: AtomicU64::new(0),
-                misses: AtomicU64::new(0),
-                evictions: AtomicU64::new(0),
-                current_open: AtomicUsize::new(0),
-            },
+            partitions,
+            current_open: AtomicUsize::new(0),
             system_fd_limit,
         }
+    }
+
+    #[inline]
+    fn partition_for(&self, path: &Path) -> &PoolPartition {
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        let idx = (hasher.finish() as usize) % self.partitions.len();
+        &self.partitions[idx]
     }
 
     /// Get or open an SSTable reader
     pub fn get(&self, path: &Path) -> Result<Arc<SSTableReader>> {
         let path_buf = path.to_path_buf();
+        let partition = self.partition_for(path);
         
         // Check cache first
         {
-            let mut cache = self.cache.lock();
+            let mut cache = partition.cache.lock();
             if let Some(reader) = cache.get(&path_buf) {
-                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                partition.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(Arc::clone(reader));
             }
         }
 
-        // Cache miss - need to open
-        self.stats.misses.fetch_add(1, Ordering::Relaxed);
+        partition.misses.fetch_add(1, Ordering::Relaxed);
 
-        // Check backpressure
         if self.config.enable_backpressure && self.should_backpressure() {
             return Err(Error::Internal {
                 message: "FD limit approaching, backpressure active".to_string(),
             });
         }
 
-        // Open new reader
         let reader = Arc::new(SSTableReader::open(path)?);
         
-        // Insert into cache (may evict old entry)
         {
-            let mut cache = self.cache.lock();
+            let mut cache = partition.cache.lock();
             let old_len = cache.len();
             cache.put(path_buf, Arc::clone(&reader));
             
             if cache.len() <= old_len && old_len > 0 {
-                // An eviction occurred
-                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                partition.evictions.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.current_open.fetch_add(1, Ordering::Relaxed);
             }
-            
-            self.stats.current_open.store(cache.len(), Ordering::Relaxed);
         }
 
         Ok(reader)
     }
 
-    /// Remove an SSTable from the pool (e.g., after compaction deletes it)
+    /// Remove an SSTable from the pool
     pub fn remove(&self, path: &Path) {
-        let mut cache = self.cache.lock();
+        let partition = self.partition_for(path);
+        let mut cache = partition.cache.lock();
         if cache.pop(&path.to_path_buf()).is_some() {
-            self.stats.current_open.store(cache.len(), Ordering::Relaxed);
+            self.current_open.fetch_sub(1, Ordering::Relaxed);
             debug!("Removed SSTable from pool: {:?}", path);
         }
     }
 
     /// Clear all cached readers
     pub fn clear(&self) {
-        let mut cache = self.cache.lock();
-        cache.clear();
-        self.stats.current_open.store(0, Ordering::Relaxed);
+        for p in &self.partitions {
+            p.cache.lock().clear();
+        }
+        self.current_open.store(0, Ordering::Relaxed);
     }
 
     /// Get current statistics
     pub fn stats(&self) -> FdStats {
+        let (hits, misses, evictions) = self.partitions.iter().fold((0, 0, 0), |acc, p| {
+            (
+                acc.0 + p.hits.load(Ordering::Relaxed),
+                acc.1 + p.misses.load(Ordering::Relaxed),
+                acc.2 + p.evictions.load(Ordering::Relaxed),
+            )
+        });
+        
         FdStats {
-            open_sstables: self.stats.current_open.load(Ordering::Relaxed),
-            cache_hits: self.stats.hits.load(Ordering::Relaxed),
-            cache_misses: self.stats.misses.load(Ordering::Relaxed),
-            evictions: self.stats.evictions.load(Ordering::Relaxed),
+            open_sstables: self.current_open.load(Ordering::Relaxed),
+            cache_hits: hits,
+            cache_misses: misses,
+            evictions,
             system_limit: self.system_fd_limit,
             estimated_used: estimate_open_fds(),
+            partitions: self.partitions.len(),
         }
     }
 
-    /// Check if we should apply backpressure
     fn should_backpressure(&self) -> bool {
         let current = estimate_open_fds();
         let threshold = (self.system_fd_limit as f64 * self.config.soft_limit_ratio) as u64;
@@ -315,11 +348,13 @@ mod tests {
             max_open_sstables: 128,
             soft_limit_ratio: 0.7,
             enable_backpressure: true,
+            partitions: 8,
         };
         let pool = SSTablePool::new(config);
         let stats = pool.stats();
         
         assert_eq!(stats.open_sstables, 0);
         assert_eq!(stats.cache_hits, 0);
+        assert_eq!(stats.partitions, 8);
     }
 }

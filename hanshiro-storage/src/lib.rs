@@ -35,6 +35,7 @@ pub mod engine;
 pub mod manifest;
 pub mod cache;
 pub mod fd;
+pub mod cached_time;
 
 pub use compaction::{Compactor, CompactionConfig, CompactionResult};
 pub use fd::{FdConfig, FdMonitor, FdStats, SSTablePool};

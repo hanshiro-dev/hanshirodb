@@ -86,6 +86,7 @@ async fn soak_test_fd_stability() {
             max_open_sstables: 64, // Lower limit to stress test pooling
             soft_limit_ratio: 0.8,
             enable_backpressure: true,
+            partitions: 4,
         },
         flush_interval: Duration::from_secs(5), // Frequent flushes to create SSTables
         compaction_interval: Duration::from_secs(10),

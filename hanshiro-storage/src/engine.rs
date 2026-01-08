@@ -1,37 +1,30 @@
-//! # Storage Engine
-//!
-//! The main storage engine that coordinates WAL, MemTable, and SSTable components.
-//!
-//! ## Storage Engine Architecture
-//!
-//! ```text
+//! Storage Engine
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │                    Storage Engine                            │
+//! │                    Storage Engine                           │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │                                                              │
-//! │  Write Path:                                                 │
-//! │  ┌─────────┐    ┌─────────┐    ┌──────────┐                │
-//! │  │  Event  │───>│   WAL   │───>│ MemTable │                │
-//! │  └─────────┘    └─────────┘    └────┬─────┘                │
-//! │                                      │ Flush                 │
-//! │                                      ▼                       │
-//! │                                ┌──────────┐                  │
-//! │                                │ SSTable  │                  │
-//! │                                └──────────┘                  │
-//! │                                                              │
-//! │  Read Path:                                                  │
-//! │  ┌─────────┐    ┌──────────┐    ┌──────────┐               │
-//! │  │  Query  │───>│ MemTable │───>│ SSTables │               │
-//! │  └─────────┘    └──────────┘    └──────────┘               │
-//! │                                                              │
-//! │  Recovery Path:                                              │
-//! │  ┌──────────┐    ┌─────────────┐    ┌──────────┐           │
-//! │  │ Manifest │───>│ WAL Replay  │───>│ MemTable │           │
-//! │  │checkpoint│    │ from seq N  │    │ rebuilt  │           │
-//! │  └──────────┘    └─────────────┘    └──────────┘           │
-//! │                                                              │
+//! │                                                             │
+//! │  Write Path:                                                │
+//! │  ┌─────────┐    ┌─────────┐    ┌──────────┐                 │
+//! │  │  Event  │───>│   WAL   │───>│ MemTable │                 │
+//! │  └─────────┘    └─────────┘    └────┬─────┘                 │
+//! │                                     │ Flush                 │
+//! │                                     ▼                       │
+//! │                                ┌──────────┐                 │
+//! │                                │ SSTable  │                 │
+//! │                                └──────────┘                 │
+//! │                                                             │
+//! │  Read Path:                                                 │
+//! │  ┌─────────┐    ┌──────────┐    ┌──────────┐                │
+//! │  │  Query  │───>│ MemTable │───>│ SSTables │                │
+//! │  └─────────┘    └──────────┘    └──────────┘                │
+//! │                                                             │
+//! │  Recovery Path:                                             │
+//! │  ┌──────────┐    ┌─────────────┐    ┌──────────┐            │
+//! │  │ Manifest │───>│ WAL Replay  │───>│ MemTable │            │
+//! │  │checkpoint│    │ from seq N  │    │ rebuilt  │            │
+//! │  └──────────┘    └─────────────┘    └──────────┘            │
+//! │                                                             │
 //! └─────────────────────────────────────────────────────────────┘
-//! ```
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,7 +52,6 @@ use crate::{
     wal::{WalConfig, WriteAheadLog},
 };
 
-/// Storage engine configuration
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
     pub data_dir: PathBuf,
