@@ -13,7 +13,7 @@ use hanshiro_core::{
 
 use super::types::*;
 
-/// In-memory representation of an open WAL file.
+/// In-memory struct of an open WAL file.
 pub(crate) struct WalFile {
     pub path: PathBuf,
     pub file: BufWriter<File>,
@@ -223,14 +223,11 @@ pub(crate) fn entry_size(entry: &WalEntry) -> usize {
 
 /// Optimized batch write that minimizes syscalls
 pub(crate) fn write_entries_batch<T: AsRef<WalEntry>>(writer: &mut impl Write, entries: &[T]) -> Result<()> {
-    // Pre-calculate total buffer size
     let total_size: usize = entries.iter().map(|e| entry_size(e.as_ref())).sum();
     let mut buffer = Vec::with_capacity(total_size);
     
-    // Serialize all entries into a single buffer
     for entry in entries {
         let entry = entry.as_ref();
-        // Entry header
         buffer.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
         buffer.extend_from_slice(&entry.sequence.to_le_bytes());
         buffer.extend_from_slice(&entry.timestamp.to_le_bytes());
@@ -239,7 +236,6 @@ pub(crate) fn write_entries_batch<T: AsRef<WalEntry>>(writer: &mut impl Write, e
         buffer.extend_from_slice(&crc32_checksum(&entry.data).to_le_bytes());
         buffer.extend_from_slice(&[0u8; 6]); // Reserved
         
-        // Merkle info (already in binary form)
         let prev_hash = entry.merkle.prev_hash.as_ref()
             .map(|h| hex::decode(h).unwrap())
             .unwrap_or_else(|| vec![0u8; 32]);
@@ -247,11 +243,9 @@ pub(crate) fn write_entries_batch<T: AsRef<WalEntry>>(writer: &mut impl Write, e
         buffer.extend_from_slice(&hex::decode(&entry.merkle.hash).unwrap());
         buffer.extend_from_slice(&hex::decode(&entry.merkle.data_hash).unwrap());
         
-        // Event data
         buffer.extend_from_slice(&entry.data);
     }
     
-    // Single write syscall for entire batch
     writer.write_all(&buffer)?;
     Ok(())
 }

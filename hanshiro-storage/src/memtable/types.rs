@@ -1,10 +1,7 @@
-//! MemTable types and configuration
-
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use hanshiro_core::{Event, EventId};
 
-/// MemTable entry
 #[derive(Debug, Clone)]
 pub struct MemTableEntry {
     pub event: Event,
@@ -12,7 +9,6 @@ pub struct MemTableEntry {
     pub timestamp: Instant,
 }
 
-/// MemTable key (combines sequence number and event ID for uniqueness)
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MemTableKey {
     pub timestamp_ns: u64,
@@ -31,7 +27,6 @@ impl MemTableKey {
     }
 }
 
-/// MemTable statistics
 #[derive(Debug, Clone, Default)]
 pub struct MemTableStats {
     pub entry_count: usize,
@@ -40,15 +35,11 @@ pub struct MemTableStats {
     pub newest_entry_age: Option<Duration>,
 }
 
-/// MemTable configuration
 #[derive(Debug, Clone)]
 pub struct MemTableConfig {
-    /// Maximum size before flush (bytes)
-    pub max_size: usize,
-    /// Maximum number of entries
-    pub max_entries: usize,
-    /// Maximum age before flush
-    pub max_age: Duration,
+    pub max_size: usize, // Maximum size before flush (bytes)
+    pub max_entries: usize, // Maximum number of entries
+    pub max_age: Duration, // Maximum age before flush
 }
 
 impl Default for MemTableConfig {
@@ -61,7 +52,6 @@ impl Default for MemTableConfig {
     }
 }
 
-/// MemTable manager statistics
 #[derive(Debug)]
 pub struct MemTableManagerStats {
     pub active: MemTableStats,

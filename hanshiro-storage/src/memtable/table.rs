@@ -1,10 +1,11 @@
-//! Core MemTable implementation
-
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_skiplist::SkipMap;
+use gxhash::GxBuildHasher;
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use tracing::{debug, info};
 
 use hanshiro_core::{
@@ -15,31 +16,25 @@ use hanshiro_core::{
 
 use super::types::{MemTableConfig, MemTableEntry, MemTableKey, MemTableStats};
 
-/// In-memory storage using concurrent skip list
+type FastHashMap<K, V> = HashMap<K, V, GxBuildHasher>;
+
 pub struct MemTable {
-    /// Skip list for ordered storage
-    pub(crate) data: Arc<SkipMap<MemTableKey, MemTableEntry>>,
-    /// Current size in bytes
+    pub(crate) data: Arc<SkipMap<MemTableKey, MemTableEntry>>, // Skip list for ordered storage
+    pub(crate) id_index: RwLock<FastHashMap<EventId, MemTableKey>>, // O(1) lookup by EventId
     pub(crate) size_bytes: Arc<AtomicUsize>,
-    /// Current number of entries
     pub(crate) entry_count: Arc<AtomicUsize>,
-    /// Sequence counter
     pub(crate) sequence: Arc<AtomicU64>,
-    /// Creation time
     pub(crate) created_at: Instant,
-    /// Configuration
     pub(crate) config: MemTableConfig,
-    /// Metrics
     metrics: Arc<Metrics>,
-    /// Read-only flag (set when flushing)
     read_only: Arc<AtomicU64>,
 }
 
 impl MemTable {
-    /// Create new MemTable
     pub fn new(config: MemTableConfig, metrics: Arc<Metrics>) -> Self {
         Self {
             data: Arc::new(SkipMap::new()),
+            id_index: RwLock::new(HashMap::with_hasher(GxBuildHasher::default())),
             size_bytes: Arc::new(AtomicUsize::new(0)),
             entry_count: Arc::new(AtomicUsize::new(0)),
             sequence: Arc::new(AtomicU64::new(0)),
@@ -50,16 +45,13 @@ impl MemTable {
         }
     }
     
-    /// Insert event into MemTable
     pub fn insert(&self, event: Event) -> Result<u64> {
-        // Check if read-only
         if self.read_only.load(Ordering::Acquire) != 0 {
             return Err(Error::MemTable {
                 message: "MemTable is read-only (being flushed)".to_string(),
             });
         }
         
-        // Check size limits
         if self.should_flush() {
             return Err(Error::MemTable {
                 message: "MemTable is full".to_string(),
@@ -68,6 +60,7 @@ impl MemTable {
         
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
         let key = MemTableKey::new(event.id);
+        let event_id = event.id;
         let entry_size = Self::estimate_entry_size(&event);
         
         let entry = MemTableEntry {
@@ -76,10 +69,9 @@ impl MemTable {
             timestamp: Instant::now(),
         };
         
-        // Insert into skip list
-        self.data.insert(key, entry);
+        self.data.insert(key.clone(), entry);
+        self.id_index.write().insert(event_id, key);
         
-        // Update counters
         self.size_bytes.fetch_add(entry_size, Ordering::Relaxed);
         self.entry_count.fetch_add(1, Ordering::Relaxed);
         
@@ -93,19 +85,11 @@ impl MemTable {
         Ok(sequence)
     }
     
-    /// Get event by ID
     pub fn get(&self, event_id: &EventId) -> Option<Event> {
-        // Since we don't know the exact timestamp, we need to scan
-        // This is not optimal but acceptable for a MemTable
-        for entry in self.data.iter() {
-            if entry.key().event_id == *event_id {
-                return Some(entry.value().event.clone());
-            }
-        }
-        None
+        let key = self.id_index.read().get(event_id).cloned()?;
+        self.data.get(&key).map(|e| e.value().event.clone())
     }
     
-    /// Scan events in time range
     pub fn scan(&self, start_ns: u64, end_ns: u64) -> Vec<Event> {
         let start_key = MemTableKey {
             timestamp_ns: start_ns,
@@ -123,7 +107,6 @@ impl MemTable {
             .collect()
     }
     
-    /// Check if MemTable should be flushed
     pub fn should_flush(&self) -> bool {
         let size = self.size_bytes.load(Ordering::Relaxed);
         let count = self.entry_count.load(Ordering::Relaxed);
@@ -134,7 +117,6 @@ impl MemTable {
             || age >= self.config.max_age
     }
     
-    /// Mark MemTable as read-only (preparation for flush)
     pub fn set_read_only(&self) {
         self.read_only.store(1, Ordering::Release);
         info!(
@@ -144,7 +126,6 @@ impl MemTable {
         );
     }
     
-    /// Get all entries for flushing
     pub fn get_all_entries(&self) -> Vec<(MemTableKey, MemTableEntry)> {
         self.data
             .iter()
@@ -152,7 +133,6 @@ impl MemTable {
             .collect()
     }
     
-    /// Clear the MemTable (after successful flush)
     pub fn clear(&self) {
         self.data.clear();
         self.size_bytes.store(0, Ordering::Relaxed);
@@ -160,7 +140,6 @@ impl MemTable {
         info!("MemTable cleared after flush");
     }
     
-    /// Get MemTable statistics
     pub fn stats(&self) -> MemTableStats {
         let now = Instant::now();
         
@@ -184,7 +163,6 @@ impl MemTable {
         }
     }
     
-    /// Estimate size of an entry in bytes
     fn estimate_entry_size(event: &Event) -> usize {
         // Base size: key + entry overhead
         let mut size = std::mem::size_of::<MemTableKey>() + std::mem::size_of::<MemTableEntry>();
@@ -192,7 +170,7 @@ impl MemTable {
         // Add event data size
         size += event.raw_data.len();
         
-        // Add metadata size (approximate - JSON string length)
+        // Add metadata size
         size += event.metadata_json.len();
         
         // Add vector size if present

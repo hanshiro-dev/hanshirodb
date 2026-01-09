@@ -156,7 +156,6 @@ impl WriteAheadLog {
             return Ok(vec![]);
         }
 
-        // Use parallel batch creation for better performance
         let entries = self.create_entries_batch(events)?;
         let sequences: Vec<u64> = entries.iter().map(|e| e.sequence).collect();
 
@@ -317,7 +316,7 @@ impl WriteAheadLog {
         let start_sequence = self.sequence.fetch_add(events.len() as u64, Ordering::SeqCst);
         let timestamp = crate::cached_time::now_ms();
         
-        // Phase 1: Parallel serialization + data hashing (CPU-bound, parallelizable)
+        // Phase 1: Parallel serialization (great oxymoron!) + data hashing (CPU-bound, parallelizable)
         let serialized: Vec<(u64, Vec<u8>, String)> = events
             .par_iter()
             .enumerate()
@@ -360,7 +359,6 @@ impl WriteAheadLog {
     }
 
     async fn write_batch(&self, entries: &[WalEntry]) -> Result<()> {
-        // Check if rotation needed based on total batch size
         let total_batch_size: u64 = entries.iter().map(|e| entry_size(e) as u64).sum();
         let needs_rotation = {
             let f = self.current_file.read();
@@ -370,7 +368,6 @@ impl WriteAheadLog {
             self.rotate().await?;
         }
 
-        // Use optimized batch write
         let mut f = self.current_file.write();
         write_entries_batch(&mut f.file, entries)?;
         f.size += total_batch_size;
