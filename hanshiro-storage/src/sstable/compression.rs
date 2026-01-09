@@ -1,8 +1,5 @@
-//! Block compression utilities
-
 use hanshiro_core::error::{Error, Result};
 
-/// Compression type for blocks
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CompressionType {
@@ -27,7 +24,6 @@ impl TryFrom<u8> for CompressionType {
     }
 }
 
-/// Compress block data using specified compression type
 pub fn compress_block(data: &[u8], compression: CompressionType) -> Result<Vec<u8>> {
     match compression {
         CompressionType::None => Ok(data.to_vec()),
@@ -50,7 +46,6 @@ pub fn compress_block(data: &[u8], compression: CompressionType) -> Result<Vec<u
     }
 }
 
-/// Decompress block data using specified compression type
 pub fn decompress_block(data: &[u8], compression: CompressionType) -> Result<Vec<u8>> {
     match compression {
         CompressionType::None => Ok(data.to_vec()),

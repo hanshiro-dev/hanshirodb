@@ -6,10 +6,9 @@ use serde::{Deserialize, Serialize};
 
 pub const SSTABLE_MAGIC: &[u8; 8] = b"HANSHIRO";
 pub const SSTABLE_VERSION: u32 = 1;
-pub const DEFAULT_BLOCK_SIZE: usize = 4 * 1024; // 4KB
+pub const DEFAULT_BLOCK_SIZE: usize = 16 * 1024; // 16KB, better for larger security events
 pub const FOOTER_SIZE: usize = 40;
 
-/// SSTable configuration
 #[derive(Debug, Clone)]
 pub struct SSTableConfig {
     pub block_size: usize,
@@ -22,14 +21,13 @@ impl Default for SSTableConfig {
     fn default() -> Self {
         Self {
             block_size: DEFAULT_BLOCK_SIZE,
-            compression: crate::sstable::CompressionType::Snappy, // Fast compression for write throughput
+            compression: crate::sstable::CompressionType::Snappy,
             bloom_bits_per_key: 10,
-            index_interval: 128, // Index every 128th key
+            index_interval: 16, // Denser index for faster point lookups
         }
     }
 }
 
-/// SSTable metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SSTableInfo {
     pub path: PathBuf,
@@ -44,18 +42,15 @@ pub struct SSTableInfo {
 }
 
 impl SSTableInfo {
-    /// Convert min_key to Bytes
     pub fn min_key_bytes(&self) -> Bytes {
         Bytes::copy_from_slice(&self.min_key)
     }
     
-    /// Convert max_key to Bytes
     pub fn max_key_bytes(&self) -> Bytes {
         Bytes::copy_from_slice(&self.max_key)
     }
 }
 
-/// Index entry in SSTable
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
     pub last_key: Bytes,
@@ -63,7 +58,6 @@ pub struct IndexEntry {
     pub block_size: u32,
 }
 
-/// Footer structure for SSTable
 #[derive(Debug, Clone)]
 pub struct SSTableFooter {
     pub index_offset: u64,

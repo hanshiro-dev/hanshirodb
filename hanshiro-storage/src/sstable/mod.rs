@@ -1,61 +1,44 @@
-//! # SSTable - Sorted String Table
-//!
 //! SSTables are immutable, sorted files that store data on disk.
 //! They are the primary storage format for HanshiroDB.
-//!
-//! ## Module Structure
-//!
-//! - `types.rs` - Core types and configuration
-//! - `writer.rs` - SSTable writer implementation
-//! - `reader.rs` - SSTable reader implementation
-//! - `builder.rs` - Block and index builders
-//! - `iterator.rs` - SSTable iteration support
-//! - `bloom.rs` - Bloom filter implementation
-//! - `compression.rs` - Block compression utilities
-//!
-//! ## SSTable File Format
-//!
-//! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │                    SSTable File Structure                    │
+//! │                    SSTable File Structure                   │
 //! ├─────────────────────────────────────────────────────────────┤
-//! │                                                              │
+//! │                                                             │
 //! │  ┌─────────────────────────────────────────────────────┐    │
-//! │  │                    Data Blocks                       │    │
-//! │  │  ┌───────────────────────────────────────────────┐  │    │
-//! │  │  │ Block 1 (Default: 4KB)                        │  │    │
-//! │  │  │ ┌─────────────────────────────────────────┐  │  │    │
-//! │  │  │ │ Entry 1: [key_len][key][value_len][val] │  │  │    │
-//! │  │  │ │ Entry 2: [key_len][key][value_len][val] │  │  │    │
-//! │  │  │ │ ...                                     │  │  │    │
-//! │  │  │ │ Entry N: [key_len][key][value_len][val] │  │  │    │
-//! │  │  │ └─────────────────────────────────────────┘  │  │    │
-//! │  │  │ Block Footer: [compression][crc32]           │  │    │
-//! │  │  └───────────────────────────────────────────────┘  │    │
+//! │  │                    Data Blocks                      │    │
+//! │  │  ┌──────────────────────────────────────────────┐   │    │
+//! │  │  │ Block 1 (Default: 16KB)                      │   │    │
+//! │  │  │ ┌─────────────────────────────────────────┐  │   │    │
+//! │  │  │ │ Entry 1: [key_len][key][value_len][val] │  │   │    │
+//! │  │  │ │ Entry 2: [key_len][key][value_len][val] │  │   │    │
+//! │  │  │ │ ...                                     │  │   │    │
+//! │  │  │ │ Entry N: [key_len][key][value_len][val] │  │   │    │
+//! │  │  │ └─────────────────────────────────────────┘  │   │    │
+//! │  │  │ Block Footer: [compression][crc32]           │   │    │
+//! │  │  └──────────────────────────────────────────────┘   │    │
 //! │  │  Block 2...                                         │    │
 //! │  └─────────────────────────────────────────────────────┘    │
-//! │                                                              │
+//! │                                                             │
 //! │  ┌─────────────────────────────────────────────────────┐    │
-//! │  │                    Index Block                       │    │
-//! │  │  ┌───────────────────────────────────────────────┐  │    │
-//! │  │  │ Index Entry 1: [last_key][offset][size]      │  │    │
-//! │  │  │ Index Entry 2: [last_key][offset][size]      │  │    │
-//! │  │  │ ...                                          │  │    │
-//! │  │  └───────────────────────────────────────────────┘  │    │
+//! │  │                    Index Block                      │    │
+//! │  │  ┌──────────────────────────────────────────────┐   │    │
+//! │  │  │ Index Entry 1: [last_key][offset][size]      │   │    │
+//! │  │  │ Index Entry 2: [last_key][offset][size]      │   │    │
+//! │  │  │ ...                                          │   │    │
+//! │  │  └──────────────────────────────────────────────┘   │    │
 //! │  └─────────────────────────────────────────────────────┘    │
-//! │                                                              │
+//! │                                                             │
 //! │  ┌─────────────────────────────────────────────────────┐    │
-//! │  │                   Bloom Filter                       │    │
+//! │  │                   Bloom Filter                      │    │
 //! │  │  [filter_data][num_probes][bits_per_key]            │    │
 //! │  └─────────────────────────────────────────────────────┘    │
-//! │                                                              │
-//! │  ┌─────────────────────────────────────────────────────┐    │
-//! │  │                      Footer                          │    │
-//! │  │  [index_offset][index_size][bloom_offset][bloom_size]│    │
-//! │  │  [magic_number][version][checksum]                  │    │
-//! │  └─────────────────────────────────────────────────────┘    │
+//! │                                                             │
+//! │  ┌──────────────────────────────────────────────────────┐   │
+//! │  │                      Footer                          │   │
+//! │  │  [index_offset][index_size][bloom_offset][bloom_size]│   │
+//! │  │  [magic_number][version][checksum]                   │   │
+//! │  └──────────────────────────────────────────────────────┘   │
 //! └─────────────────────────────────────────────────────────────┘
-//! ```
 
 mod bloom;
 mod builder;

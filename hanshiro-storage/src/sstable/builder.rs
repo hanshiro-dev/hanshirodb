@@ -4,7 +4,6 @@ use bytes::{Bytes, BytesMut, BufMut};
 use byteorder::{LittleEndian, WriteBytesExt};
 use hanshiro_core::error::{Error, Result};
 
-/// Builder for SSTable data blocks
 pub struct BlockBuilder {
     buffer: BytesMut,
     offsets: Vec<u32>,
