@@ -3,12 +3,16 @@
 use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 use bytes::Bytes;
 use byteorder::{LittleEndian, ReadBytesExt};
 use memmap2::{Mmap, MmapOptions};
 
 use hanshiro_core::error::{Error, Result};
+use crate::cache::{BlockCache, CacheKey};
 use crate::sstable::{
     BloomFilter, SSTableConfig, SSTableInfo, SSTableIterator,
     decompress_block, CompressionType, SSTABLE_MAGIC, SSTABLE_VERSION, FOOTER_SIZE,
@@ -17,11 +21,13 @@ use crate::sstable::{
 /// SSTable reader
 pub struct SSTableReader {
     path: PathBuf,
+    file_id: u64,
     mmap: Mmap,
     info: SSTableInfo,
     index: SSTableIndex,
     bloom_filter: Option<BloomFilter>,
     config: SSTableConfig,
+    cache: Option<Arc<BlockCache>>,
 }
 
 /// SSTable index for fast lookups
@@ -127,14 +133,33 @@ impl SSTableReader {
             level: 0,
         };
         
+        // Compute file_id from path hash
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        let file_id = hasher.finish();
+        
         Ok(Self {
             path,
+            file_id,
             mmap,
             info,
             index,
             bloom_filter,
-            config: SSTableConfig::default(), // Could be stored in file
+            config: SSTableConfig::default(),
+            cache: None,
         })
+    }
+    
+    /// Open with block cache
+    pub fn open_with_cache(path: impl AsRef<Path>, cache: Arc<BlockCache>) -> Result<Self> {
+        let mut reader = Self::open(path)?;
+        reader.cache = Some(cache);
+        Ok(reader)
+    }
+    
+    /// Set cache after opening
+    pub fn set_cache(&mut self, cache: Arc<BlockCache>) {
+        self.cache = Some(cache);
     }
     
     /// Get value by key
@@ -159,8 +184,18 @@ impl SSTableReader {
         self.search_block(&block_data, key)
     }
     
-    /// Read and decompress a block
+    /// Read and decompress a block (with cache)
     pub(crate) fn read_block(&self, offset: u64, size: u32) -> Result<Vec<u8>> {
+        let cache_key = CacheKey::new(self.file_id, offset);
+        
+        // Check cache first
+        if let Some(ref cache) = self.cache {
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached.to_vec());
+            }
+        }
+        
+        // Cache miss - read from mmap
         let block_end = offset + size as u64 - 5; // -5 for footer
         let block_data = &self.mmap[offset as usize..block_end as usize];
         
@@ -177,8 +212,15 @@ impl SSTableReader {
             });
         }
         
-        // Decompress if needed
-        decompress_block(block_data, compression)
+        // Decompress
+        let decompressed = decompress_block(block_data, compression)?;
+        
+        // Store in cache
+        if let Some(ref cache) = self.cache {
+            cache.insert(cache_key, Bytes::copy_from_slice(&decompressed));
+        }
+        
+        Ok(decompressed)
     }
     
     /// Search for key within a block

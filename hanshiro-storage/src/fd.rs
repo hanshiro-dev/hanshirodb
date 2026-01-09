@@ -18,6 +18,7 @@ use parking_lot::Mutex;
 use tracing::{debug, info};
 
 use hanshiro_core::error::{Error, Result};
+use crate::cache::BlockCache;
 use crate::sstable::SSTableReader;
 
 /// FD pool configuration
@@ -70,10 +71,15 @@ pub struct SSTablePool {
     partitions: Vec<PoolPartition>,
     current_open: AtomicUsize,
     system_fd_limit: u64,
+    block_cache: Option<Arc<BlockCache>>,
 }
 
 impl SSTablePool {
     pub fn new(config: FdConfig) -> Self {
+        Self::with_cache(config, None)
+    }
+    
+    pub fn with_cache(config: FdConfig, block_cache: Option<Arc<BlockCache>>) -> Self {
         let system_fd_limit = get_fd_limit();
         let max_size = config.max_open_sstables.min(
             ((system_fd_limit as f64 * config.soft_limit_ratio) as usize).saturating_sub(64)
@@ -98,8 +104,8 @@ impl SSTablePool {
             .collect();
 
         info!(
-            "SSTable pool: {} partitions, {} per partition, system_limit={}",
-            num_partitions, per_partition, system_fd_limit
+            "SSTable pool: {} partitions, {} per partition, system_limit={}, block_cache={}",
+            num_partitions, per_partition, system_fd_limit, block_cache.is_some()
         );
 
         Self {
@@ -107,6 +113,7 @@ impl SSTablePool {
             partitions,
             current_open: AtomicUsize::new(0),
             system_fd_limit,
+            block_cache,
         }
     }
 
@@ -140,7 +147,10 @@ impl SSTablePool {
             });
         }
 
-        let reader = Arc::new(SSTableReader::open(path)?);
+        let reader = match &self.block_cache {
+            Some(cache) => Arc::new(SSTableReader::open_with_cache(path, Arc::clone(cache))?),
+            None => Arc::new(SSTableReader::open(path)?),
+        };
         
         {
             let mut cache = partition.cache.lock();

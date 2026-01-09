@@ -43,3 +43,4 @@ pub use fd::{FdConfig, FdMonitor, FdStats, SSTablePool};
 pub use engine::StorageEngine;
 pub use wal::WriteAheadLog;
 pub use memtable::{MemTable, MemTableManager};
+pub use cache::{BlockCache, CacheKey, CacheStats};

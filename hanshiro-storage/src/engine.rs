@@ -62,6 +62,8 @@ pub struct StorageConfig {
     pub fd_config: FdConfig,
     pub flush_interval: Duration,
     pub compaction_interval: Duration,
+    /// Block cache size in bytes (0 = disabled, default 64MB)
+    pub block_cache_size: usize,
 }
 
 impl Default for StorageConfig {
@@ -74,7 +76,8 @@ impl Default for StorageConfig {
             compaction_config: CompactionConfig::default(),
             fd_config: FdConfig::default(),
             flush_interval: Duration::from_secs(60),
-            compaction_interval: Duration::from_secs(30), // More aggressive than usual for security logs
+            compaction_interval: Duration::from_secs(30),
+            block_cache_size: 64 * 1024 * 1024, // 64MB default
         }
     }
 }
@@ -162,7 +165,14 @@ impl StorageEngine {
 
         let next_sstable_id = Arc::new(std::sync::atomic::AtomicU64::new(next_sstable_id));
 
-        let sstable_pool = Arc::new(SSTablePool::new(config.fd_config.clone()));
+        // Create block cache if enabled
+        let block_cache = if config.block_cache_size > 0 {
+            Some(Arc::new(crate::cache::BlockCache::new(config.block_cache_size)))
+        } else {
+            None
+        };
+
+        let sstable_pool = Arc::new(SSTablePool::with_cache(config.fd_config.clone(), block_cache));
         let fd_monitor = Arc::new(FdMonitor::new(config.fd_config.soft_limit_ratio));
 
         let compactor = Arc::new(Compactor::new(
