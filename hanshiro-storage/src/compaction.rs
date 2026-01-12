@@ -67,6 +67,8 @@ pub struct CompactionResult {
     pub bytes_written: u64,
     pub entries_merged: u64,
     pub entries_dropped: u64,
+    /// Keys that survived compaction (for vector index filtering)
+    pub live_keys: Vec<Vec<u8>>,
 }
 
 /// Compactor handles background compaction
@@ -168,6 +170,7 @@ impl Compactor {
         }
 
         let mut last_key: Option<Bytes> = None;
+        let mut live_keys: Vec<Vec<u8>> = Vec::new();
 
         while let Some(Reverse(entry)) = heap.pop() {
             // Deduplicate: keep only the newest version of each key
@@ -177,6 +180,7 @@ impl Compactor {
                 entries_dropped += 1;
             } else {
                 writer.add(&entry.key, &entry.value)?;
+                live_keys.push(entry.key.to_vec());
                 entries_merged += 1;
                 last_key = Some(entry.key.clone());
             }
@@ -226,6 +230,7 @@ impl Compactor {
             bytes_written,
             entries_merged,
             entries_dropped,
+            live_keys,
         })
     }
 

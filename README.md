@@ -1,5 +1,3 @@
-# HanshiroDB
-
 <div align="center">
   <img src="docs/logo.png" alt="HanshiroDB Logo" width="800"/>
   

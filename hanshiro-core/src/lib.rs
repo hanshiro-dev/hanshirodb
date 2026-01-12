@@ -14,6 +14,7 @@
 //! │                  hanshiro-core                  │
 //! ├─────────────────────────────────────────────────┤
 //! │  • types         - Core data structures        │
+//! │  • value         - Polymorphic KV values       │
 //! │  • traits        - Database interfaces         │
 //! │  • error         - Error handling              │
 //! │  • crypto        - Merkle chains & checksums   │
@@ -30,12 +31,17 @@ pub mod serialization;
 pub mod traits;
 pub mod types;
 pub mod utils;
+pub mod value;
 
 // Re-export commonly used types
 pub use error::{Error, Result};
 pub use types::{
     Event, EventId, EventType, EventSource, IngestionFormat,
     Vector, VectorId,
+};
+pub use value::{
+    HanshiroValue, KeyPrefix, StorageKey,
+    CodeArtifact, FileType, Capabilities, IndexEntry,
 };
 pub use serialization::{serialize_event, deserialize_event, archived_event};
 

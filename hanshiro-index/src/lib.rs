@@ -27,13 +27,15 @@
 //! - `simd`: SIMD-accelerated distance calculations (AVX2/FMA)
 //! - `traits`: Common VectorIndex trait
 //! - `flat`: Brute-force exact search (ground truth)
-//! - `vamana`: DiskANN graph index (coming soon)
+//! - `vamana`: DiskANN graph index
+//! - `compaction`: Vector index compaction for LSM integration
 
 pub mod simd;
 pub mod traits;
 pub mod flat;
 pub mod vamana;
 pub mod hybrid;
+pub mod compaction;
 
 pub use simd::{
     cosine_similarity, cosine_distance, dot_product,
@@ -46,3 +48,4 @@ pub use traits::{VectorIndex, SearchResult, IndexConfig};
 pub use flat::FlatIndex;
 pub use vamana::{VamanaIndex, VamanaConfig};
 pub use hybrid::{HybridIndex, HybridConfig, VectorSearchResult};
+pub use compaction::{VectorIndexCompactor, VectorCompactionConfig, VectorCompactionResult, vidx_path_for_sstable};

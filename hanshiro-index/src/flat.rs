@@ -123,33 +123,29 @@ impl VectorIndex for FlatIndex {
             });
         }
         
-        // Normalize for cosine similarity
-        let normalized = if self.config.metric == DistanceMetric::Cosine {
-            let mut v = vector.to_vec();
-            normalize(&mut v);
-            v
-        } else {
-            vector.to_vec()
-        };
+        // Normalize in-place only for cosine, otherwise use directly
+        let needs_normalize = self.config.metric == DistanceMetric::Cosine;
         
-        // Store f32 vectors
+        // Single lock acquisition for vectors
         {
             let mut vectors = self.vectors.write();
-            vectors.extend_from_slice(&normalized);
+            if needs_normalize {
+                let start = vectors.len();
+                vectors.extend_from_slice(vector);
+                normalize(&mut vectors[start..]);
+            } else {
+                vectors.extend_from_slice(vector);
+            }
         }
         
-        // Store quantized if enabled
+        // Store quantized if enabled (separate lock, but less common path)
         if self.config.quantized {
-            let quantized = quantize_sq8(&normalized);
-            let mut vectors_sq8 = self.vectors_sq8.write();
-            vectors_sq8.extend_from_slice(&quantized);
+            let quantized = quantize_sq8(vector);
+            self.vectors_sq8.write().extend_from_slice(&quantized);
         }
         
         // Store ID
-        {
-            let mut ids = self.ids.write();
-            ids.push(id);
-        }
+        self.ids.write().push(id);
         
         self.count.fetch_add(1, Ordering::Relaxed);
         Ok(())

@@ -61,6 +61,8 @@ pub struct WalConfig {
     pub buffer_size: usize,
     pub group_commit_delay_us: u64,
     pub max_batch_size: usize,
+    /// Enable Merkle chain integrity (tamper-proof). Disable for higher throughput.
+    pub merkle_enabled: bool,
 }
 
 impl Default for WalConfig {
@@ -72,6 +74,7 @@ impl Default for WalConfig {
             buffer_size: 64 * 1024, // 64KB
             group_commit_delay_us: 2000,
             max_batch_size: 512,
+            merkle_enabled: true, // Enabled by default for tamper-proof storage
         }
     }
 }

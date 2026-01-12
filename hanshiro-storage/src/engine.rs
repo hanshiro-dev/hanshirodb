@@ -26,6 +26,7 @@
 //! │                                                             │
 //! └─────────────────────────────────────────────────────────────┘
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,11 +41,13 @@ use hanshiro_core::{
     error::{Error, Result},
     metrics::Metrics,
     traits::*,
-    Event, EventId,
+    Event, EventId, HanshiroValue, KeyPrefix, CodeArtifact, IndexEntry,
+    serialization::serialize_value,
 };
+use hanshiro_index::{VectorCompactionConfig, VectorIndexCompactor, vidx_path_for_sstable};
 
 use crate::{
-    compaction::{Compactor, CompactionConfig},
+    compaction::{Compactor, CompactionConfig, CompactionJob},
     fd::{FdConfig, FdMonitor, SSTablePool},
     manifest::{Manifest, SSTableManifestEntry},
     memtable::{MemTableConfig, MemTableManager},
@@ -59,6 +62,7 @@ pub struct StorageConfig {
     pub memtable_config: MemTableConfig,
     pub sstable_config: SSTableConfig,
     pub compaction_config: CompactionConfig,
+    pub vector_compaction_config: VectorCompactionConfig,
     pub fd_config: FdConfig,
     pub flush_interval: Duration,
     pub compaction_interval: Duration,
@@ -74,6 +78,7 @@ impl Default for StorageConfig {
             memtable_config: MemTableConfig::default(),
             sstable_config: SSTableConfig::default(),
             compaction_config: CompactionConfig::default(),
+            vector_compaction_config: VectorCompactionConfig::default(),
             fd_config: FdConfig::default(),
             flush_interval: Duration::from_secs(60),
             compaction_interval: Duration::from_secs(30),
@@ -81,6 +86,8 @@ impl Default for StorageConfig {
         }
     }
 }
+
+use crate::correlation::{CorrelationEngine, CorrelationConfig, Correlation};
 
 pub struct StorageEngine {
     config: StorageConfig,
@@ -94,6 +101,7 @@ pub struct StorageEngine {
     sstable_pool: Arc<SSTablePool>,
     fd_monitor: Arc<FdMonitor>,
     compactor: Arc<Compactor>,
+    correlation_engine: Arc<CorrelationEngine>,
 }
 
 impl StorageEngine {
@@ -194,6 +202,7 @@ impl StorageEngine {
             sstable_pool,
             fd_monitor,
             compactor,
+            correlation_engine: Arc::new(CorrelationEngine::new(CorrelationConfig::default())),
         };
 
         engine.start_background_tasks();
@@ -341,11 +350,11 @@ impl StorageEngine {
 
             let mut writer = SSTableWriter::new(&sstable_path, config.sstable_config.clone())?;
 
-            // Write all entries
+            // Write all entries (now using HanshiroValue)
             for (key, entry) in &entries {
                 let key_bytes = rmp_serde::to_vec(&key)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
-                let value_bytes = hanshiro_core::serialize_event(&entry.event)
+                let value_bytes = serialize_value(&entry.value)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
                 writer.add(&key_bytes, &value_bytes)?;
 
@@ -413,8 +422,14 @@ impl StorageEngine {
             None => return Ok(()),
         };
 
-        // Execute compaction (blocking, could be moved to spawn_blocking for large files)
+        // Execute SSTable compaction
         let result = compactor.execute(job.clone())?;
+
+        // Run vector index compaction (CPU-heavy, use spawn_blocking)
+        let vector_result = Self::run_vector_compaction(&job, &result, config).await;
+        if let Err(e) = &vector_result {
+            warn!("Vector compaction failed (non-fatal): {:?}", e);
+        }
 
         // Update manifest: remove old, add new
         {
@@ -453,11 +468,72 @@ impl StorageEngine {
         let paths: Vec<_> = job.input_sstables.iter().map(|s| s.path.clone()).collect();
         compactor.cleanup_inputs(&paths)?;
 
+        // Cleanup old .vidx files
+        let vidx_paths: Vec<_> = paths.iter().map(|p| vidx_path_for_sstable(p)).collect();
+        if let Err(e) = hanshiro_index::compaction::cleanup_vidx_files(&vidx_paths) {
+            warn!("Failed to cleanup .vidx files: {:?}", e);
+        }
+
         info!(
             "Compaction complete: {} files merged, {} bytes reclaimed",
             result.input_ids.len(),
             result.bytes_read.saturating_sub(result.bytes_written)
         );
+
+        Ok(())
+    }
+
+    /// Run vector index compaction after SSTable compaction
+    async fn run_vector_compaction(
+        job: &CompactionJob,
+        result: &crate::compaction::CompactionResult,
+        config: &StorageConfig,
+    ) -> Result<()> {
+        let output_sstable = match &result.output_sstable {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Derive .vidx paths
+        let input_vidx_paths: Vec<PathBuf> = job
+            .input_sstables
+            .iter()
+            .map(|s| vidx_path_for_sstable(&s.path))
+            .collect();
+
+        // Check if any .vidx files exist
+        let has_vidx = input_vidx_paths.iter().any(|p| p.exists());
+        if !has_vidx {
+            debug!("No .vidx files to compact");
+            return Ok(());
+        }
+
+        let output_vidx_path = vidx_path_for_sstable(&output_sstable.path);
+
+        // Build live_ids set from live_keys
+        // Keys are MessagePack-serialized EventIds
+        let live_ids: HashSet<u64> = result
+            .live_keys
+            .iter()
+            .filter_map(|key_bytes| {
+                // Deserialize EventId from key bytes
+                rmp_serde::from_slice::<EventId>(key_bytes)
+                    .ok()
+                    .map(|id| id.hi ^ id.lo) // Use XOR of hi/lo as u64 identifier
+            })
+            .collect();
+
+        let vector_config = config.vector_compaction_config.clone();
+
+        // Run in spawn_blocking since graph building is CPU-intensive
+        tokio::task::spawn_blocking(move || {
+            let compactor = VectorIndexCompactor::new(vector_config);
+            compactor.compact(&input_vidx_paths, &output_vidx_path, &live_ids)
+        })
+        .await
+        .map_err(|e| Error::Internal {
+            message: format!("Vector compaction task failed: {}", e),
+        })??;
 
         Ok(())
     }
@@ -498,6 +574,236 @@ impl StorageEngine {
     /// Check FD health
     pub fn fd_healthy(&self) -> bool {
         self.fd_monitor.check().healthy
+    }
+
+    // ========== HanshiroValue API ==========
+
+    /// Write any HanshiroValue (Log, Code, or Index)
+    /// Auto-correlation is done lazily, not on the write path
+    pub async fn write_value(&self, value: HanshiroValue) -> Result<EventId> {
+        let id = match &value {
+            HanshiroValue::Log(e) => e.id,
+            HanshiroValue::Code(c) => c.id,
+            HanshiroValue::Index(_) => EventId::new(),
+        };
+
+        // For logs, write to WAL for durability
+        if let HanshiroValue::Log(event) = &value {
+            self.wal.append(event).await?;
+        }
+
+        // Write to MemTable
+        self.memtable_manager.insert_value(value)?;
+        self.metrics.record_ingestion(1, 0);
+
+        Ok(id)
+    }
+
+    /// Write a CodeArtifact
+    pub async fn write_code(&self, artifact: CodeArtifact) -> Result<EventId> {
+        let id = artifact.id;
+        self.memtable_manager.insert_code(artifact)?;
+        self.metrics.record_ingestion(1, 0);
+        Ok(id)
+    }
+
+    /// Write an IndexEntry (for graph relationships)
+    pub async fn write_index(&self, index: IndexEntry) -> Result<EventId> {
+        let id = EventId::new();
+        self.memtable_manager.insert_index(index)?;
+        Ok(id)
+    }
+
+    /// Run auto-correlation between all logs and code artifacts in memory.
+    /// Call this after batch inserts, not on every write (for performance).
+    pub async fn correlate_all(&self) -> Result<Vec<Correlation>> {
+        let logs = self.memtable_manager.scan_logs();
+        let code_artifacts = self.memtable_manager.scan_code();
+        
+        if logs.is_empty() || code_artifacts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut all_correlations = Vec::new();
+        
+        for log in &logs {
+            let correlations = self.correlation_engine.correlate_log_to_code(log, &code_artifacts);
+            all_correlations.extend(correlations);
+        }
+
+        // Store correlations as index entries
+        self.store_correlations(&all_correlations).await?;
+        
+        Ok(all_correlations)
+    }
+
+    /// Correlate a specific log against all code artifacts
+    pub async fn correlate_log(&self, log: &Event) -> Result<Vec<Correlation>> {
+        let code_artifacts = self.memtable_manager.scan_code();
+        if code_artifacts.is_empty() {
+            return Ok(vec![]);
+        }
+        
+        let correlations = self.correlation_engine.correlate_log_to_code(log, &code_artifacts);
+        self.store_correlations(&correlations).await?;
+        Ok(correlations)
+    }
+
+    /// Correlate a specific code artifact against all logs
+    pub async fn correlate_code(&self, artifact: &CodeArtifact) -> Result<Vec<Correlation>> {
+        let logs = self.memtable_manager.scan_logs();
+        if logs.is_empty() {
+            return Ok(vec![]);
+        }
+        
+        let correlations = self.correlation_engine.correlate_code_to_logs(artifact, &logs);
+        self.store_correlations(&correlations).await?;
+        Ok(correlations)
+    }
+
+    /// Store correlations as index entries
+    async fn store_correlations(&self, correlations: &[Correlation]) -> Result<()> {
+        for corr in correlations {
+            let mut index = IndexEntry::new(
+                format!("{:?}", corr.correlation_type),
+                format!("{}", corr.target_id),
+            );
+            index.add_ref(corr.source_id);
+            self.memtable_manager.insert_index(index)?;
+        }
+        Ok(())
+    }
+
+    /// Find entities correlated to the given ID
+    pub async fn find_correlated(&self, id: EventId) -> Result<Vec<EventId>> {
+        // Scan index entries for correlations
+        let indexes = self.memtable_manager.scan_prefix(KeyPrefix::Index);
+        let mut correlated = Vec::new();
+        
+        for value in indexes {
+            if let Some(idx) = value.as_index() {
+                // Check if this index references our ID
+                if idx.refs.contains(&id) {
+                    // The index value is the correlated entity ID
+                    if let Ok(target_id) = idx.value.parse::<u64>() {
+                        correlated.push(EventId { hi: target_id, lo: 0 });
+                    }
+                }
+                // Or if the index is about our ID
+                if idx.value.contains(&format!("{}", id)) {
+                    correlated.extend(idx.refs.iter().cloned());
+                }
+            }
+        }
+        
+        Ok(correlated)
+    }
+
+    /// Find similar entities by vector similarity
+    pub async fn find_similar(&self, query_vector: &[f32], top_k: usize) -> Result<Vec<(EventId, f32)>> {
+        // Collect all vectors from logs and code
+        let mut candidates = Vec::new();
+        
+        for log in self.memtable_manager.scan_logs() {
+            if let Some(vec) = &log.vector {
+                candidates.push((log.id, vec.data.clone()));
+            }
+        }
+        
+        for code in self.memtable_manager.scan_code() {
+            if let Some(vec) = &code.vector {
+                candidates.push((code.id, vec.data.clone()));
+            }
+        }
+        
+        let results = self.correlation_engine.find_similar_by_vector(
+            query_vector,
+            &candidates,
+            top_k,
+        );
+        
+        Ok(results)
+    }
+
+    /// Read any value by ID
+    pub async fn read_value(&self, id: EventId) -> Result<Option<HanshiroValue>> {
+        // Check MemTable first
+        if let Some(value) = self.memtable_manager.get_value(&id) {
+            return Ok(Some(value));
+        }
+
+        // Check SSTables
+        let sstables = self.sstables.read().await;
+        for info in sstables.iter().rev() {
+            let reader = self.sstable_pool.get(&info.path)?;
+            let key = rmp_serde::to_vec(&id)
+                .map_err(|e| Error::Internal { message: e.to_string() })?;
+
+            if let Some(value_bytes) = reader.get(&key)? {
+                let value = hanshiro_core::serialization::deserialize_value(&value_bytes)?;
+                return Ok(Some(value));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Read a CodeArtifact by ID
+    pub async fn read_code(&self, id: EventId) -> Result<Option<CodeArtifact>> {
+        Ok(self.read_value(id).await?.and_then(|v| v.as_code().cloned()))
+    }
+
+    /// Scan all values by prefix (virtual table)
+    pub async fn scan_prefix(&self, prefix: KeyPrefix) -> Result<Vec<HanshiroValue>> {
+        let mut results = self.memtable_manager.scan_prefix(prefix);
+
+        // Also scan SSTables (would need prefix-aware iteration)
+        // For now, just return memtable results
+        // TODO: Add SSTable prefix scanning
+
+        Ok(results)
+    }
+
+    /// Scan all logs
+    pub async fn scan_logs(&self) -> Result<Vec<Event>> {
+        Ok(self.memtable_manager.scan_logs())
+    }
+
+    /// Scan all code artifacts
+    pub async fn scan_code(&self) -> Result<Vec<CodeArtifact>> {
+        Ok(self.memtable_manager.scan_code())
+    }
+
+    /// Create a secondary index linking a field/value to entity IDs
+    pub async fn create_index(&self, field: &str, value: &str, refs: Vec<EventId>) -> Result<()> {
+        let mut index = IndexEntry::new(field, value);
+        for id in refs {
+            index.add_ref(id);
+        }
+        self.write_index(index).await?;
+        Ok(())
+    }
+
+    /// Link a code artifact to related logs
+    pub async fn link_code_to_logs(&self, code_id: EventId, log_ids: Vec<EventId>) -> Result<()> {
+        // Get the code artifact
+        if let Some(mut artifact) = self.read_code(code_id).await? {
+            // Get hash before modifying
+            let hash_hex = artifact.hash_hex();
+
+            // Add log references
+            for log_id in &log_ids {
+                if !artifact.related_logs.contains(log_id) {
+                    artifact.related_logs.push(*log_id);
+                }
+            }
+            // Re-write the artifact
+            self.write_code(artifact).await?;
+
+            // Also create a reverse index: hash -> log_ids
+            self.create_index("hash", &hash_hex, log_ids).await?;
+        }
+        Ok(())
     }
 }
 

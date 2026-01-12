@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "hanshiro_api"
+path = "src/lib.rs"
+
 [[bin]]
 name = "hanshiro-api"
 path = "src/main.rs"
@@ -14,7 +18,6 @@ path = "src/main.rs"
 hanshiro-core = { path = "../hanshiro-core" }
 hanshiro-storage = { path = "../hanshiro-storage" }
 hanshiro-index = { path = "../hanshiro-index" }
-hanshiro-ingest = { path = "../hanshiro-ingest" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
@@ -23,12 +26,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 
-# API dependencies
-tonic = { workspace = true }
-tonic-reflection = { workspace = true }
-prost = { workspace = true }
-tower = { workspace = true }
-hyper = { workspace = true }
-
 [dev-dependencies]
 tempfile = { workspace = true }
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"

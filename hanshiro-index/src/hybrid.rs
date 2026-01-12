@@ -110,7 +110,7 @@ impl HybridIndex {
             });
         }
 
-        // Get internal index
+        // Get internal index and insert into flat in one go
         let internal_id = {
             let mut id_map = self.id_map.write();
             let idx = id_map.len() as u64;
@@ -121,15 +121,18 @@ impl HybridIndex {
         // Insert into flat index
         self.flat.insert(internal_id, vector)?;
 
-        // Check if we should build/update graph
+        // Check if we should build/update graph (less frequent path)
         let n = self.flat.len();
         if self.config.use_graph && n >= self.config.graph_threshold {
             // Rebuild graph periodically (every 2x threshold)
             if n == self.config.graph_threshold || n % (self.config.graph_threshold * 2) == 0 {
                 self.rebuild_graph()?;
-            } else if let Some(ref graph) = *self.graph.read() {
-                // Incremental insert
-                graph.insert(internal_id, vector)?;
+            } else {
+                // Incremental insert - only take read lock if graph exists
+                let graph = self.graph.read();
+                if let Some(ref g) = *graph {
+                    g.insert(internal_id, vector)?;
+                }
             }
         }
 
@@ -213,7 +216,7 @@ impl HybridIndex {
         let id_map = self.id_map.read();
         let id_bytes: Vec<u8> = id_map
             .iter()
-            .flat_map(|id| id.0.as_bytes().to_vec())
+            .flat_map(|id| id.to_uuid().as_bytes().to_vec())
             .collect();
         std::fs::write(dir.join("id_map.bin"), &id_bytes)?;
 
@@ -241,7 +244,8 @@ impl HybridIndex {
             if chunk.len() == 16 {
                 let uuid = uuid::Uuid::from_slice(chunk)
                     .map_err(|e| Error::Internal { message: e.to_string() })?;
-                id_map.push(EventId(uuid));
+                let (hi, lo) = uuid.as_u64_pair();
+                id_map.push(EventId { hi, lo });
             }
         }
 

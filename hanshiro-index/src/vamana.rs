@@ -169,6 +169,23 @@ impl VamanaIndex {
         vectors[start..start + dim].to_vec()
     }
 
+    /// Iterate over all (id, vector) pairs. Used for compaction.
+    pub fn iter_entries(&self) -> Vec<(u64, Vec<f32>)> {
+        let nodes = self.nodes.read();
+        let vectors = self.vectors.read();
+        let dim = self.config.dimension;
+
+        nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, node)| {
+                let start = idx * dim;
+                let vec = vectors[start..start + dim].to_vec();
+                (node.id, vec)
+            })
+            .collect()
+    }
+
     /// Get vector slice at index (for distance calculation)
     #[inline]
     fn vector_slice<'a>(&self, vectors: &'a [f32], idx: usize) -> &'a [f32] {

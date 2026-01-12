@@ -1,5 +1,3 @@
-//! Block and index builders for SSTable
-
 use bytes::{Bytes, BytesMut, BufMut};
 use byteorder::{LittleEndian, WriteBytesExt};
 use hanshiro_core::error::{Error, Result};
@@ -12,7 +10,6 @@ pub struct BlockBuilder {
 }
 
 impl BlockBuilder {
-    /// Create a new block builder with specified max size
     pub fn new(max_size: usize) -> Self {
         Self {
             buffer: BytesMut::with_capacity(max_size),
@@ -22,8 +19,6 @@ impl BlockBuilder {
         }
     }
     
-    /// Add a key-value pair to the block
-    /// Returns false if the block is full
     pub fn add(&mut self, key: &[u8], value: &[u8]) -> bool {
         let entry_size = 4 + key.len() + 4 + value.len(); // key_len + key + value_len + value
         

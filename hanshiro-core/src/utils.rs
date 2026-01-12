@@ -48,10 +48,10 @@ pub fn clamp<T: PartialOrd>(value: T, min: T, max: T) -> T {
 
 /// Round up to next power of 2
 pub fn next_power_of_two(n: u64) -> u64 {
-    if n == 0 {
+    if n <= 1 {
         1
     } else {
-        (n - 1).next_power_of_two()
+        n.next_power_of_two()
     }
 }
 

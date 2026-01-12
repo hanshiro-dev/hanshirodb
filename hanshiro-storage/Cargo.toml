@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 # Core dependencies
 hanshiro-core = { path = "../hanshiro-core" }
+hanshiro-index = { path = "../hanshiro-index" }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
