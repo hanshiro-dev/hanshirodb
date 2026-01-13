@@ -5,13 +5,16 @@ High-level Rust API for SecOps vector database operations.
 ## Quick Start
 
 ```rust
-use hanshiro_api::{HanshiroClient, EventBuilder, CodeArtifactBuilder};
+use hanshiro_api::{HanshiroClient, EventBuilder, CodeArtifactBuilder, RemoteClient};
 use hanshiro_core::{EventType, IngestionFormat, value::FileType};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Open database
+    // Local (embedded)
     let db = HanshiroClient::open("./data").await?;
+    
+    // OR Remote (server)
+    let db = RemoteClient::connect("http://10.0.1.100:3000").await?;
 
     // Ingest a security event
     let event = EventBuilder::new(EventType::ProcessStart)
@@ -42,9 +45,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-## HanshiroClient
+## Deployment Modes
 
-Main client for database operations.
+### Embedded (Local)
+
+Direct file access, no network overhead:
+
+```rust
+let db = HanshiroClient::open("./data").await?;
+```
+
+### Server Mode
+
+Start server:
+```bash
+cargo run --bin hanshiro-server -- --data-dir ./data --port 3000
+```
+
+Connect remotely:
+```rust
+let client = RemoteClient::connect("http://10.0.1.100:3000").await?;
+```
+
+---
+
+## REST API Endpoints
+
+### JSON Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| POST | `/events` | Ingest event |
+| GET | `/events/{hi}/{lo}` | Get event by ID |
+| GET | `/events` | Scan all logs |
+| POST | `/code` | Store code artifact |
+| GET | `/code/{hi}/{lo}` | Get code by ID |
+| POST | `/similar` | Vector similarity search |
+| POST | `/correlate` | Run auto-correlation |
+
+### Binary Endpoints (High-Performance)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/bin/events` | Ingest event (binary) |
+| GET | `/bin/events/{hi}/{lo}` | Get event (binary) |
+| POST | `/bin/code` | Store code (binary) |
+
+Binary endpoints use rkyv serialization for zero-copy performance.
+
+### Examples
+
+```bash
+# Health check
+curl http://localhost:3000/health
+
+# Ingest event (JSON)
+curl -X POST http://localhost:3000/events \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_type": "ProcessStart",
+    "source_host": "ws-01",
+    "collector": "crowdstrike",
+    "raw_data": "{\"process\":\"cmd.exe\"}",
+    "metadata": {"severity": "high"}
+  }'
+
+# Get all logs
+curl http://localhost:3000/events
+
+# Vector similarity search
+curl -X POST http://localhost:3000/similar \
+  -H "Content-Type: application/json" \
+  -d '{"vector": [0.1, 0.2, ...], "top_k": 10}'
+
+# Run correlation
+curl -X POST http://localhost:3000/correlate
+```
+
+---
+
+## HanshiroClient (Embedded)
 
 ### Opening a Database
 
@@ -63,74 +144,59 @@ let config = StorageConfig {
 let db = HanshiroClient::open_with_config(config).await?;
 ```
 
-### Event Operations
+### Methods
 
 | Method | Description |
 |--------|-------------|
 | `ingest_event(event)` | Store a security event |
 | `get_event(id)` | Retrieve event by ID |
 | `scan_logs()` | Scan all log entries |
-
-```rust
-// Ingest
-let id = db.ingest_event(event).await?;
-
-// Retrieve
-if let Some(event) = db.get_event(id).await? {
-    println!("Found: {:?}", event.event_type);
-}
-
-// Scan all
-for event in db.scan_logs().await? {
-    println!("{}: {}", event.id, event.event_type);
-}
-```
-
-### Code Artifact Operations
-
-| Method | Description |
-|--------|-------------|
 | `store_code(artifact)` | Store binary/script analysis |
 | `get_code(id)` | Retrieve artifact by ID |
 | `scan_code()` | Scan all code artifacts |
-
-```rust
-let id = db.store_code(artifact).await?;
-let artifacts = db.scan_code().await?;
-```
-
-### Correlation Operations
-
-| Method | Description |
-|--------|-------------|
 | `correlate_all()` | Auto-correlate all logs ↔ code |
 | `find_correlated(id)` | Find entities related to ID |
 | `find_similar(vector, k)` | Vector similarity search |
+| `flush()` | Force flush to disk |
+
+---
+
+## RemoteClient
+
+### Connecting
 
 ```rust
-// Run auto-correlation (hash matching, vector similarity)
-let correlations = db.correlate_all().await?;
-for c in correlations {
-    println!("{:?} -> {:?} ({:?}, score: {:.2})", 
-        c.source_id, c.target_id, c.correlation_type, c.score);
-}
-
-// Find related entities
-let related = db.find_correlated(malware_id).await?;
-
-// Vector similarity search
-let similar = db.find_similar(&query_vector, 10).await?;
+let client = RemoteClient::connect("http://10.0.1.100:3000").await?;
 ```
 
-### Utility
+### JSON Methods
 
 ```rust
-// Force flush to disk
-db.flush().await?;
+// Ingest (JSON - debuggable)
+client.ingest_event(api_event).await?;
+client.store_code(api_artifact).await?;
 
-// Access underlying engine for advanced ops
-let engine = db.engine();
+// Query
+let event = client.get_event(id).await?;
+let logs = client.scan_logs().await?;
+
+// Search & correlate
+let similar = client.find_similar(&vector, 10).await?;
+let correlations = client.correlate_all().await?;
 ```
+
+### Binary Methods (High-Performance)
+
+```rust
+// Ingest (binary - faster)
+client.ingest_event_binary(&event).await?;
+client.store_code_binary(&artifact).await?;
+
+// Query (binary)
+let event = client.get_event_binary(id).await?;
+```
+
+Use binary methods for bulk ingestion pipelines.
 
 ---
 
@@ -149,43 +215,26 @@ let event = EventBuilder::new(EventType::NetworkConnection)
     .build();
 ```
 
-### Methods
-
-| Method | Description |
-|--------|-------------|
-| `new(event_type)` | Create builder with event type |
-| `source(host, collector, format)` | Set event source |
-| `source_ip(ip)` | Set source IP address |
-| `raw_data(data)` | Set raw event data |
-| `metadata(key, value)` | Add metadata field |
-| `vector(data)` | Set embedding vector |
-| `build()` | Build the Event |
-
 ### Event Types
 
 ```rust
-EventType::NetworkConnection  // Network conn established
-EventType::NetworkTraffic     // Traffic flow data
-EventType::DNSQuery           // DNS lookup
-EventType::HTTPRequest        // HTTP request
-EventType::Authentication     // Login attempt
-EventType::Authorization      // Access control
-EventType::FileCreate         // File created
-EventType::FileModify         // File modified
-EventType::FileDelete         // File deleted
-EventType::ProcessStart       // Process spawned
-EventType::ProcessStop        // Process terminated
-EventType::MalwareDetected    // AV/EDR detection
-EventType::AnomalyDetected    // Behavioral anomaly
-EventType::PolicyViolation    // Policy breach
-EventType::Custom(String)     // Custom event type
+EventType::NetworkConnection
+EventType::NetworkTraffic
+EventType::DNSQuery
+EventType::HTTPRequest
+EventType::Authentication
+EventType::FileCreate / FileModify / FileDelete
+EventType::ProcessStart / ProcessStop
+EventType::MalwareDetected
+EventType::AnomalyDetected
+EventType::PolicyViolation
+EventType::Custom(String)
 ```
 
 ### Ingestion Formats
 
 ```rust
 IngestionFormat::OCSF      // Open Cybersecurity Schema
-IngestionFormat::STIX      // STIX 2.x
 IngestionFormat::Zeek      // Zeek/Bro logs
 IngestionFormat::Suricata  // Suricata alerts
 IngestionFormat::CEF       // Common Event Format
@@ -225,14 +274,13 @@ FileType::MachO     // macOS executable
 FileType::Script    // PowerShell, Python, etc.
 FileType::Document  // Office docs with macros
 FileType::Archive   // ZIP/RAR with embedded content
-FileType::Unknown
 ```
 
 ---
 
 ## Embedder Trait
 
-Trait for integrating embedding models.
+Integrate your ML model for generating embeddings.
 
 ```rust
 use hanshiro_api::Embedder;
@@ -249,15 +297,13 @@ impl Embedder for MyModel {
 }
 ```
 
-### Production Options
+### Recommended Models
 
 | Model | Use Case | Dimensions |
 |-------|----------|------------|
 | all-MiniLM-L6-v2 | Log text | 384 |
-| SBERT | Log text | 768 |
 | CodeBERT | Code/binaries | 768 |
 | Titan Embeddings | General (AWS) | 1536 |
-| text-embedding-3-small | General (OpenAI) | 1536 |
 
 ### Example: AWS Bedrock
 
@@ -284,28 +330,6 @@ impl Embedder for BedrockEmbedder {
 }
 ```
 
-### Example: Local ONNX
-
-```rust
-struct OnnxEmbedder {
-    session: ort::Session,
-    tokenizer: tokenizers::Tokenizer,
-}
-
-#[async_trait]
-impl Embedder for OnnxEmbedder {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let encoding = self.tokenizer.encode(text, true)?;
-        let input_ids = encoding.get_ids();
-        
-        let outputs = self.session.run(ort::inputs![input_ids]?)?;
-        Ok(outputs[0].try_extract()?.view().to_vec())
-    }
-    
-    fn dimension(&self) -> usize { 384 }
-}
-```
-
 ---
 
 ## Correlation Types
@@ -314,44 +338,16 @@ Auto-correlation detects relationships via:
 
 | Type | Description |
 |------|-------------|
-| `VectorSimilarity` | Embedding vectors are similar (cosine > 0.85) |
+| `VectorSimilarity` | Embedding cosine similarity > 0.85 |
 | `HashMatch` | Log mentions artifact's SHA256 hash |
 | `FilenameMatch` | Log mentions artifact's filename |
-| `IpMatch` | IP address correlation |
-| `Manual` | User-defined relationship |
 
 ```rust
 let correlations = db.correlate_all().await?;
 
 for c in correlations {
-    match c.correlation_type {
-        CorrelationType::VectorSimilarity => {
-            println!("Similar behavior: {} -> {} (score: {:.2})", 
-                c.source_id, c.target_id, c.score);
-        }
-        CorrelationType::HashMatch => {
-            println!("Hash match: {} references {}", 
-                c.source_id, c.target_id);
-        }
-        _ => {}
-    }
-}
-```
-
----
-
-## Error Handling
-
-All async methods return `Result<T>`:
-
-```rust
-use hanshiro_core::error::{Error, Result};
-
-match db.ingest_event(event).await {
-    Ok(id) => println!("Stored: {}", id),
-    Err(Error::Io { message, .. }) => eprintln!("IO error: {}", message),
-    Err(Error::Internal { message }) => eprintln!("Internal: {}", message),
-    Err(e) => eprintln!("Error: {:?}", e),
+    println!("{:?} -> {:?} ({:?}, score: {:.2})", 
+        c.source_id, c.target_id, c.correlation_type, c.score);
 }
 ```
 
@@ -359,16 +355,17 @@ match db.ingest_event(event).await {
 
 ## Performance Tips
 
-1. **Batch ingestion**: Use `write_batch()` on engine for bulk inserts
-2. **Lazy correlation**: Call `correlate_all()` after batch inserts, not per-event
-3. **Vector dimensions**: Use 128-384 dims for speed, 768+ for accuracy
+1. **Use binary endpoints** for bulk ingestion (`/bin/events`)
+2. **Batch correlation**: Call `correlate_all()` after batch inserts, not per-event
+3. **Vector dimensions**: 128-384 for speed, 768+ for accuracy
 4. **Block cache**: Increase `block_cache_size` for read-heavy workloads
 
 ```rust
-// Batch insert via engine
-let events: Vec<Event> = ...;
-db.engine().write_batch(events).await?;
+// High-throughput ingestion
+for event in events {
+    client.ingest_event_binary(&event).await?;
+}
 
 // Then correlate once
-db.correlate_all().await?;
+client.correlate_all().await?;
 ```

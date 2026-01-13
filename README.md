@@ -12,12 +12,11 @@
 
 HanshiroDB is a specialized vector database built from the ground up for security operations. Unlike traditional vector databases optimized for recommendation systems, HanshiroDB is engineered for:
 
-- **Massive Write Throughput**: Handle 350,000+ security events per second
-- **Tamper-Proof Storage**: Blockchain-like Merkle chaining ensures data integrity
-- **Hybrid Search**: Combine vector similarity with metadata filtering in real-time
-- **Time-Travel Queries**: Reconstruct the exact state at any point in history
-- **Native SecOps Support**: Built-in parsers for OCSF, STIX/TAXII, Zeek, and more
-
+- **Massive Write Throughput**: 980,000+ events per second
+- **Tamper-Proof Storage**: Merkle chaining ensures data integrity
+- **Auto-Correlation**: Automatically links logs ↔ malware samples
+- **Vector Similarity**: Find similar threats using embeddings
+- **Polymorphic Storage**: Logs, code artifacts, and indexes in one DB
 
 ## Quick Start
 
@@ -29,83 +28,150 @@ cd hanshirodb
 cargo build --release
 ```
 
-### Basic Usage
+### Embedded Mode (Local)
 
 ```rust
-// Connect to HanshiroDB
-let client = HanshiroClient::connect("localhost:9090").await?;
+use hanshiro_api::{HanshiroClient, EventBuilder};
+use hanshiro_core::{EventType, IngestionFormat};
 
-// Ingest a security event
-let event = SecurityEvent {
-    timestamp: Utc::now(),
-    source_ip: "10.0.0.1".parse()?,
-    event_type: EventType::Authentication,
-    raw_log: "Failed login attempt for user admin",
-    metadata: json!({
-        "severity": "high",
-        "user": "admin",
-        "service": "ssh"
-    }),
-};
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Open local database
+    let db = HanshiroClient::open("./data").await?;
 
-client.ingest(event).await?;
+    // Ingest a security event
+    let event = EventBuilder::new(EventType::ProcessStart)
+        .source("endpoint-01", "crowdstrike", IngestionFormat::Raw)
+        .source_ip("10.0.1.50")
+        .raw_data(r#"{"process":"suspicious.exe","parent":"explorer.exe"}"#)
+        .metadata("severity", "critical")
+        .metadata("technique", "T1059.001")
+        .vector(embedding)  // From your ML model
+        .build();
 
-// Vector similarity search with metadata filtering
-let results = client
-    .search()
-    .vector_query("suspicious authentication pattern")
-    .filter("severity", "high")
-    .filter("service", "ssh")
-    .time_range(Utc::now() - Duration::hours(24), Utc::now())
-    .limit(100)
-    .execute()
-    .await?;
+    let id = db.ingest_event(event).await?;
+
+    // Find similar events by vector
+    let similar = db.find_similar(&query_vector, 10).await?;
+
+    // Auto-correlate logs with malware samples
+    let correlations = db.correlate_all().await?;
+
+    Ok(())
+}
 ```
+
+### Server Mode (Remote)
+
+Start the server:
+```bash
+cargo run --bin hanshiro-server -- --data-dir ./data --port 3000
+```
+
+Connect from anywhere:
+```rust
+use hanshiro_api::RemoteClient;
+
+let client = RemoteClient::connect("http://10.0.1.100:3000").await?;
+
+// JSON API (debuggable)
+client.ingest_event(event).await?;
+
+// Binary API (high-throughput)
+client.ingest_event_binary(&event).await?;
+```
+
+### REST API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| POST | `/events` | Ingest event (JSON) |
+| GET | `/events/{hi}/{lo}` | Get event by ID |
+| GET | `/events` | Scan all logs |
+| POST | `/code` | Store code artifact |
+| POST | `/similar` | Vector similarity search |
+| POST | `/correlate` | Run auto-correlation |
+| POST | `/bin/events` | Ingest event (binary, fast) |
+| POST | `/bin/code` | Store code (binary, fast) |
+
+Example with curl:
+```bash
+# Ingest event
+curl -X POST http://localhost:3000/events \
+  -H "Content-Type: application/json" \
+  -d '{"event_type":"ProcessStart","source_host":"ws-01","collector":"edr","raw_data":"{}"}'
+
+# Get all logs
+curl http://localhost:3000/events
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     HanshiroDB                               │
+├─────────────────────────────────────────────────────────────┤
+│  hanshiro-api     │ HTTP server, RemoteClient, builders     │
+│  hanshiro-core    │ Types, serialization (rkyv), crypto     │
+│  hanshiro-storage │ LSM-tree, WAL, MemTable, SSTable        │
+│  hanshiro-index   │ Vamana graph, flat index, SIMD          │
+└─────────────────────────────────────────────────────────────┘
+
+Write Path:  Event → WAL (Merkle) → MemTable → SSTable
+Read Path:   Query → MemTable → SSTables (bloom filter)
+Vector Path: Query → Vamana Graph → Top-K results
+```
+
+## Data Model
+
+HanshiroDB stores three types of data with key prefixes:
+
+| Prefix | Type | Description |
+|--------|------|-------------|
+| `0x01` | Log | Security events (OCSF, Zeek, Suricata) |
+| `0x02` | Code | Malware/binary analysis artifacts |
+| `0x03` | Index | Secondary indexes, graph relationships |
+
+Auto-correlation links logs to code via:
+- **Vector similarity**: Embedding cosine distance > 0.85
+- **Hash matching**: Log mentions artifact's SHA256
+- **Filename matching**: Log references artifact filename
 
 ## Documentation
 
-- [Architecture Guide](docs/architecture.md) - Deep dive into internals
-- [API Reference](docs/api.md) - Complete API documentation
-- [Operations Manual](docs/ops.md) - Deployment and monitoring
-- [Security Model](docs/security.md) - Threat model and hardening
+- [API Reference](docs/API.md) - Client API, builders, embedder trait
+- [Data Model](docs/DATA_MODEL.md) - Storage internals, key structure
+- [Optimization Guide](docs/OPTIMIZATION_GUIDE.md) - Performance tuning
 
 ## Development
 
-### Prerequisites
-
-### Building
-
 ```bash
-# Debug build
-cargo build
-
-# Release build with optimizations
+# Build
 cargo build --release
 
-# Run tests
+# Test
 cargo test
 
-# Run benchmarks
-cargo bench
+# Run server
+cargo run --bin hanshiro-server -- --data-dir ./data --port 3000
+
+# Benchmarks
+cargo test --release -p hanshiro-storage --test storage_peak_performance
 ```
 
-### Key Areas for Contribution
+## Performance
 
-- Additional security data format parsers
-- Performance optimizations
-- Query language enhancements
-- Monitoring integrations
-- Documentation improvements
+| Metric | Value |
+|--------|-------|
+| Write throughput | 980K events/sec |
+| Latency per event | ~1 µs |
+| Vector dimensions | 128-768 |
+| Serialization | rkyv (zero-copy) |
 
+## License
 
-## 🙏 Acknowledgments
-
-HanshiroDB builds upon ideas from:
-
-- **LevelDB / RocksDB** - LSM-tree implementation 
-- **DiskANN** - Disk-based vector indexing
-- **Tantivy** - Full-text search in Rust
-- **InfluxDB** - Time-series optimization
+Apache 2.0
 
 ---
 
