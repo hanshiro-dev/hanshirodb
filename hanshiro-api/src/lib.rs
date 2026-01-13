@@ -2,22 +2,23 @@
 //!
 //! High-level API for SecOps vector database operations.
 //!
-//! ## Embeddings
+//! ## Local vs Remote
 //!
-//! In production, embeddings come from ML models:
-//! - **Logs**: Sentence transformers (all-MiniLM-L6-v2, SBERT)
-//! - **Malware**: CodeBERT, function2vec, or custom models
-//! - **Network**: Flow/packet embedding models
-//!
-//! Implement the `Embedder` trait to integrate your model:
 //! ```ignore
-//! impl Embedder for MyModel {
-//!     async fn embed(&self, text: &str) -> Result<Vec<f32>> { ... }
-//! }
+//! // Local (embedded) - opens database files directly
+//! let db = HanshiroClient::open("./data").await?;
+//!
+//! // Remote - connects to server via HTTP
+//! let db = RemoteClient::connect("http://10.0.1.100:3000").await?;
 //! ```
 
 pub mod client;
 pub mod embedder;
+pub mod server;
+pub mod remote;
 
 pub use client::{HanshiroClient, EventBuilder, CodeArtifactBuilder};
 pub use embedder::Embedder;
+pub use server::{AppState, create_router, ApiEvent, ApiCodeArtifact};
+pub use remote::RemoteClient;
+
