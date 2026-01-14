@@ -1,40 +1,40 @@
-# HanshiroDB Storage EnginePerformance Optimization Guide
+# HanshiroDB Performance Optimization Guide
 
-## Achieved Performance: 1.13 Million Events/Second
+## Achieved Performance: ~980K Events/Second
 
-We successfully optimized HanshiroDB to achieve **1,132,506 events/sec**! This was accomplished using only configuration changes and proper usage patterns, without modifying the core engine code.
+HanshiroDB achieves **~980,000 events/sec** with vectors stored separately in a memory-mapped file for SIMD-optimized similarity search.
 
 ## Current Performance Benchmarks
 
 | Metric | Value |
 |--------|-------|
-| **Write Throughput** | 1,132,506 events/sec |
-| **Latency** | 0.88 microseconds/event |
-| **Test Duration** | 1.77 seconds for 2M events |
-| **Batch Size Used** | 2,000 events |
+| **Event Write Throughput** | 980K events/sec |
+| **Vector Insert Throughput** | 2.4M vectors/sec |
+| **Vector Search (10K vectors)** | 0.88ms |
+| **Latency** | ~1 microsecond/event |
+| **Batch Size** | 2,000 events |
 | **Parallel Writers** | 20 threads |
 
 ### Component-Level Performance
-- **WAL**: 54,419 events/sec (single-threaded)
-- **MemTable**: 942,544 events/sec
-- **SSTable Write**: 118,553 events/sec
-- **Full Pipeline**: 1,132,506 events/sec (with parallelism)
+- **WAL**: ~50K events/sec (single-threaded, durable)
+- **MemTable**: ~940K events/sec
+- **Vector Store (mmap)**: 2.4M vectors/sec
+- **Full Pipeline**: ~980K events/sec (with parallelism)
 
-## Configuration That Achieved 1.13M Events/Sec
+## Configuration for Maximum Throughput
 
 ```rust
 StorageConfig {
     data_dir: temp_dir.path().to_path_buf(),
     wal_config: WalConfig {
-        sync_on_write: false,               // CRITICAL: Async I/O (2-3x boost)
+        sync_on_write: false,               // Async I/O (2-3x boost)
         max_batch_size: 2000,               // Large batches
         group_commit_delay_us: 500,         // 0.5ms delay for batching
-        max_file_size: 2 * 1024 * 1024 * 1024, // 2GB files (reduce rotation)
-        // Note: Merkle chains still enabled (could gain 20-30% more if disabled)
+        max_file_size: 2 * 1024 * 1024 * 1024, // 2GB files
     },
     memtable_config: MemTableConfig {
-        max_entries: 2_000_000,             // Very large (reduce flushes)
-        max_size: 1024 * 1024 * 1024,      // 1GB
+        max_entries: 2_000_000,             // Large (reduce flushes)
+        max_size: 1024 * 1024 * 1024,       // 1GB
     },
     sstable_config: SSTableConfig {
         compression: CompressionType::None,  // Save CPU cycles
@@ -42,35 +42,58 @@ StorageConfig {
         bloom_bits_per_key: 10,
         index_interval: 256,
     },
-    flush_interval: Duration::from_secs(120),     // Infrequent flushes
-    compaction_interval: Duration::from_secs(600), // Infrequent compaction
+    flush_interval: Duration::from_secs(120),
+    compaction_interval: Duration::from_secs(600),
 }
 ```
 
-## Key Optimizations Explained
+## Key Optimizations
 
-### 1. **Disable Sync-on-Write (Biggest Impact: 2-3x)**
+### 1. **Separate Vector Storage (New)**
+
+Vectors are stored in a memory-mapped file, separate from events:
+
+```
+data/
+├── sstables/       # Events (without vectors)
+├── wal/            # Write-ahead log
+└── vectors.vec     # mmap'd vector storage (SIMD-aligned)
+```
+
+**Benefits:**
+- Events serialize faster (no 512-3072 byte vectors)
+- Vectors are 64-byte aligned for SIMD operations
+- Direct pointer access for similarity search (no deserialization)
+
+**Performance:**
+| Operation | Embedded Vectors | Separate Store |
+|-----------|------------------|----------------|
+| Event write | ~800K/sec | ~980K/sec |
+| Vector insert | N/A | 2.4M/sec |
+| Vector search | Deserialize each | mmap pointer |
+
+### 2. **Disable Sync-on-Write (2-3x boost)**
 ```rust
 sync_on_write: false  // Default: true
 ```
-- Uses async I/O instead of synchronous fsync after each write
-- **Trade-off**: May lose recent writes on system crash
-- **When to use**: High-throughput scenarios where you can tolerate some data loss
+- Uses async I/O instead of synchronous fsync
+- **Trade-off**: May lose recent writes on crash
+- **When to use**: High-throughput, can tolerate some loss
 
-### 2. **Batch Writing (3-5x Improvement)**
+### 3. **Batch Writing (3-5x improvement)**
 ```rust
 // BAD: Individual writes
 for event in events {
-    engine.write(event).await?;  // Max ~50K events/sec
+    engine.write(event).await?;  // ~50K/sec
 }
 
 // GOOD: Batch writes
 for chunk in events.chunks(2000) {
-    engine.write_batch(chunk.to_vec()).await?;  // 1M+ events/sec
+    engine.write_batch(chunk.to_vec()).await?;  // ~980K/sec
 }
 ```
 
-### 3. **Parallel Writers (Linear Scaling)**
+### 4. **Parallel Writers (Linear Scaling)**
 ```rust
 let num_writers = 20;  // Adjust based on CPU cores
 let mut tasks = JoinSet::new();

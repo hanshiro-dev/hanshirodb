@@ -37,10 +37,12 @@ pub mod manifest;
 pub mod cache;
 pub mod fd;
 pub mod cached_time;
+pub mod vector_store;
 
 pub use compaction::{Compactor, CompactionConfig, CompactionResult};
 pub use correlation::{CorrelationEngine, CorrelationConfig, Correlation, CorrelationType};
 pub use fd::{FdConfig, FdMonitor, FdStats, SSTablePool};
+pub use vector_store::VectorStore;
 
 pub use engine::StorageEngine;
 pub use wal::WriteAheadLog;

@@ -289,8 +289,70 @@ HanshiroDB supports graph-like queries without a separate graph database:
 |-----------|------------|-------|
 | Point lookup | O(log N) | Bloom filters skip irrelevant SSTables |
 | Prefix scan | O(K) | K = number of matching keys |
-| Vector search | O(log N) | Per-segment Vamana graphs |
+| Vector search | O(N) | Brute-force over mmap'd vectors, SIMD-friendly |
+| Vector insert | O(1) | Append to mmap'd file |
 | Index lookup | O(1) + O(M) | M = number of refs |
+
+## Vector Storage Architecture
+
+Vectors are stored separately from events in a memory-mapped file for SIMD-optimized similarity search.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Storage Architecture                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Events (LSM-Tree)              Vectors (mmap'd file)           │
+│  ┌─────────────────┐            ┌─────────────────────┐         │
+│  │ WAL → MemTable  │            │  vectors.vec        │         │
+│  │      ↓          │            │  ┌───────────────┐  │         │
+│  │   SSTable L0    │            │  │ Header (64B)  │  │         │
+│  │   SSTable L1    │            │  ├───────────────┤  │         │
+│  │      ...        │            │  │ [id][vector]  │  │ 64-byte │
+│  └─────────────────┘            │  │ [id][vector]  │  │ aligned │
+│                                 │  │ [id][vector]  │  │         │
+│  Event without vector           │  │     ...       │  │         │
+│  (smaller, faster serialize)    │  └───────────────┘  │         │
+│                                 └─────────────────────┘         │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Vector File Format
+
+```
+Header (64 bytes):
+  magic:      [u8; 8]  = "HNSHVEC\0"
+  version:    u32
+  dimension:  u32
+  count:      u64
+  entry_size: u32      (aligned to 64 bytes)
+  padding:    [u8; 36]
+
+Entry (64-byte aligned):
+  id_hi:      u64
+  id_lo:      u64
+  vector:     [f32; dimension]
+  padding:    [u8; ...]
+```
+
+### Benefits
+
+| Aspect | Embedded Vectors | Separate Vector Store |
+|--------|------------------|----------------------|
+| Event serialization | Includes 512-3072 bytes | Excludes vector |
+| Vector access | Deserialize event first | Direct mmap pointer |
+| SIMD alignment | No guarantee | 64-byte aligned |
+| Search performance | O(N) deserializations | O(N) pointer reads |
+| Storage overhead | None | +16 bytes/vector (ID) |
+
+### Performance
+
+| Operation | Throughput |
+|-----------|------------|
+| Event ingestion | 980K events/sec |
+| Vector insert | 2.4M vectors/sec |
+| Vector search (10K, top-10) | 0.88ms |
 
 ## Serialization
 

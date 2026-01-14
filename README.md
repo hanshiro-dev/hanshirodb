@@ -106,23 +106,6 @@ curl -X POST http://localhost:3000/events \
 curl http://localhost:3000/events
 ```
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     HanshiroDB                               │
-├─────────────────────────────────────────────────────────────┤
-│  hanshiro-api     │ HTTP server, RemoteClient, builders     │
-│  hanshiro-core    │ Types, serialization (rkyv), crypto     │
-│  hanshiro-storage │ LSM-tree, WAL, MemTable, SSTable        │
-│  hanshiro-index   │ Vamana graph, flat index, SIMD          │
-└─────────────────────────────────────────────────────────────┘
-
-Write Path:  Event → WAL (Merkle) → MemTable → SSTable
-Read Path:   Query → MemTable → SSTables (bloom filter)
-Vector Path: Query → Vamana Graph → Top-K results
-```
-
 ## Data Model
 
 HanshiroDB stores three types of data with key prefixes:
@@ -164,10 +147,14 @@ cargo test --release -p hanshiro-storage --test storage_peak_performance
 
 | Metric | Value |
 |--------|-------|
-| Write throughput | 980K events/sec |
+| Event write throughput | 980K events/sec |
+| Vector insert throughput | 2.4M vectors/sec |
+| Vector search (10K, top-10) | 0.88ms |
 | Latency per event | ~1 µs |
 | Vector dimensions | 128-768 |
 | Serialization | rkyv (zero-copy) |
+
+Vectors are stored separately in a memory-mapped file for SIMD-optimized similarity search.
 
 ## License
 

@@ -88,6 +88,10 @@ impl Default for StorageConfig {
 }
 
 use crate::correlation::{CorrelationEngine, CorrelationConfig, Correlation};
+use crate::vector_store::VectorStore;
+
+/// Default vector dimension (can be overridden in config)
+const DEFAULT_VECTOR_DIMENSION: usize = 128;
 
 pub struct StorageEngine {
     config: StorageConfig,
@@ -102,6 +106,7 @@ pub struct StorageEngine {
     fd_monitor: Arc<FdMonitor>,
     compactor: Arc<Compactor>,
     correlation_engine: Arc<CorrelationEngine>,
+    vector_store: Arc<VectorStore>,
 }
 
 impl StorageEngine {
@@ -190,6 +195,11 @@ impl StorageEngine {
             Arc::clone(&next_sstable_id),
         ));
 
+        // Initialize vector store
+        let vector_path = config.data_dir.join("vectors.vec");
+        let vector_store = Arc::new(VectorStore::open(&vector_path, DEFAULT_VECTOR_DIMENSION)
+            .map_err(|e| Error::Internal { message: format!("Failed to open vector store: {}", e) })?);
+
         let engine = Self {
             config,
             wal,
@@ -203,6 +213,7 @@ impl StorageEngine {
             fd_monitor,
             compactor,
             correlation_engine: Arc::new(CorrelationEngine::new(CorrelationConfig::default())),
+            vector_store,
         };
 
         engine.start_background_tasks();
@@ -579,7 +590,7 @@ impl StorageEngine {
     // ========== HanshiroValue API ==========
 
     /// Write any HanshiroValue (Log, Code, or Index)
-    /// Auto-correlation is done lazily, not on the write path
+    /// Vectors are stored separately in mmap'd storage for SIMD performance
     pub async fn write_value(&self, value: HanshiroValue) -> Result<EventId> {
         let id = match &value {
             HanshiroValue::Log(e) => e.id,
@@ -587,9 +598,25 @@ impl StorageEngine {
             HanshiroValue::Index(_) => EventId::new(),
         };
 
-        // For logs, write to WAL for durability
-        if let HanshiroValue::Log(event) = &value {
-            self.wal.append(event).await?;
+        // Extract and store vector separately
+        match &value {
+            HanshiroValue::Log(e) => {
+                if let Some(ref vec) = e.vector {
+                    if vec.data.len() == self.vector_store.dimension() {
+                        self.vector_store.insert(e.id, &vec.data)?;
+                    }
+                }
+                // Write to WAL for durability
+                self.wal.append(e).await?;
+            }
+            HanshiroValue::Code(c) => {
+                if let Some(ref vec) = c.vector {
+                    if vec.data.len() == self.vector_store.dimension() {
+                        self.vector_store.insert(c.id, &vec.data)?;
+                    }
+                }
+            }
+            HanshiroValue::Index(_) => {}
         }
 
         // Write to MemTable
@@ -602,6 +629,14 @@ impl StorageEngine {
     /// Write a CodeArtifact
     pub async fn write_code(&self, artifact: CodeArtifact) -> Result<EventId> {
         let id = artifact.id;
+        
+        // Store vector separately
+        if let Some(ref vec) = artifact.vector {
+            if vec.data.len() == self.vector_store.dimension() {
+                self.vector_store.insert(id, &vec.data)?;
+            }
+        }
+        
         self.memtable_manager.insert_code(artifact)?;
         self.metrics.record_ingestion(1, 0);
         Ok(id)
@@ -699,30 +734,20 @@ impl StorageEngine {
         Ok(correlated)
     }
 
-    /// Find similar entities by vector similarity
+    /// Find similar entities by vector similarity using mmap'd vector store
     pub async fn find_similar(&self, query_vector: &[f32], top_k: usize) -> Result<Vec<(EventId, f32)>> {
-        // Collect all vectors from logs and code
-        let mut candidates = Vec::new();
-        
-        for log in self.memtable_manager.scan_logs() {
-            if let Some(vec) = &log.vector {
-                candidates.push((log.id, vec.data.clone()));
-            }
-        }
-        
-        for code in self.memtable_manager.scan_code() {
-            if let Some(vec) = &code.vector {
-                candidates.push((code.id, vec.data.clone()));
-            }
-        }
-        
-        let results = self.correlation_engine.find_similar_by_vector(
-            query_vector,
-            &candidates,
-            top_k,
-        );
-        
-        Ok(results)
+        // Use the mmap'd vector store for SIMD-friendly search
+        Ok(self.vector_store.find_similar(query_vector, top_k))
+    }
+
+    /// Get vector for an entity from the vector store
+    pub fn get_vector(&self, id: &EventId) -> Option<Vec<f32>> {
+        self.vector_store.get(id)
+    }
+
+    /// Get vector store statistics
+    pub fn vector_store_stats(&self) -> (usize, usize) {
+        (self.vector_store.len(), self.vector_store.dimension())
     }
 
     /// Read any value by ID
